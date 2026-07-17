@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0a0f14">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>SkySpotter</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { height:100%; overflow:hidden; background:#0a0f14; font-family:system-ui,-apple-system,sans-serif; color:#fff; }
+  #video { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; }
+  #overlay { position:fixed; inset:0; width:100%; height:100%; touch-action:none; }
+  #status {
+    position:fixed; top:calc(env(safe-area-inset-top,0px) + 10px); left:50%; transform:translateX(-50%);
+    background:rgba(16,24,32,.85); border:1px solid rgba(79,195,247,.25); border-radius:14px;
+    padding:5px 14px; font-size:12px; color:rgba(255,255,255,.88); white-space:nowrap; z-index:5;
+  }
+  #detail {
+    position:fixed; left:12px; right:12px; bottom:calc(env(safe-area-inset-bottom,0px) + 86px);
+    background:rgba(16,24,32,.88); border:1px solid rgba(79,195,247,.25); border-radius:14px;
+    padding:12px 14px; display:none; z-index:5;
+  }
+  #detail .l1 { font-size:17px; font-weight:700; }
+  #detail .l2 { font-size:14px; color:#80d8ff; margin-top:2px; }
+  #detail .l3 { font-size:13px; color:rgba(255,255,255,.8); margin-top:4px; }
+  .btn {
+    position:fixed; z-index:6; border:none; border-radius:22px; padding:12px 18px;
+    background:rgba(79,195,247,.9); color:#00141f; font-size:15px; font-weight:700;
+  }
+  #modeBtn { right:16px; bottom:calc(env(safe-area-inset-bottom,0px) + 16px); }
+  #fovBox {
+    position:fixed; left:16px; bottom:calc(env(safe-area-inset-bottom,0px) + 16px); z-index:6;
+    background:rgba(16,24,32,.8); border-radius:22px; padding:6px 10px; font-size:13px;
+    display:flex; gap:10px; align-items:center; color:rgba(255,255,255,.85);
+  }
+  #fovBox button { border:none; background:rgba(79,195,247,.25); color:#fff; border-radius:14px;
+    width:32px; height:32px; font-size:18px; font-weight:700; }
+  #startScreen {
+    position:fixed; inset:0; z-index:20; background:#0a0f14; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:18px; text-align:center; padding:28px;
+  }
+  #startScreen h1 { font-size:26px; letter-spacing:.5px; }
+  #startScreen p { font-size:14px; color:rgba(255,255,255,.65); max-width:340px; line-height:1.45; }
+  #startBtn { position:static; font-size:17px; padding:14px 34px; }
+  #err { color:#ffb74d; font-size:13px; max-width:340px; }
+</style>
+</head>
+<body>
+
+<video id="video" autoplay muted playsinline></video>
+<canvas id="overlay"></canvas>
+<div id="status">Démarrage…</div>
+<div id="detail"><div class="l1"></div><div class="l2"></div><div class="l3"></div></div>
+<button id="modeBtn" class="btn">Radar</button>
+<div id="fovBox"><button id="fovMinus">−</button><span id="fovLabel">FOV 55°</span><button id="fovPlus">+</button></div>
+
+<div id="startScreen">
+  <h1>✈ SkySpotter</h1>
+  <p>Pointez la caméra vers un avion pour l'identifier (données ADS-B temps réel via adsb.lol).
+     L'application a besoin de la caméra, de la position et des capteurs d'orientation.
+     Tenez le téléphone en portrait.</p>
+  <button id="startBtn" class="btn">Démarrer</button>
+  <div id="err"></div>
+</div>
+
+<script>
+"use strict";
+
+/* ================= Constantes & état ================= */
+const EARTH_R = 6371000;
+const RADIUS_NM = 40;                       // rayon de recherche (≈ 74 km)
+const RANGE_KM = RADIUS_NM * 1.852;
+const POLL_MS = 5000;
+const API_BASES = ["https://api.adsb.lol", "https://api.adsb.one"]; // failover
+
+const S = {
+  arMode: true,
+  user: null,                // {lat, lon, altM, acc}
+  cam: { az: 0, el: 0, roll: 0, has: false },
+  hFov: parseFloat(localStorage.getItem("hFov") || "55"),
+  aircraft: [],              // liste courante
+  routes: new Map(),         // callsign -> "CDG-JFK" | "" (inconnue)
+  routesCooldownUntil: 0,
+  selected: null,            // hex
+  hits: [],                  // zones cliquables du dernier rendu
+  netError: false,
+  lastFetch: 0,
+};
+
+const $ = id => document.getElementById(id);
+const video = $("video"), canvas = $("overlay"), ctx = canvas.getContext("2d");
+const D2R = Math.PI/180, R2D = 180/Math.PI;
+
+/* ================= Géodésie ================= */
+function haversineM(la1, lo1, la2, lo2) {
+  const p1=la1*D2R, p2=la2*D2R, dp=(la2-la1)*D2R, dl=(lo2-lo1)*D2R;
+  const a = Math.sin(dp/2)**2 + Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;
+  return 2*EARTH_R*Math.asin(Math.sqrt(a));
+}
+function bearingDeg(la1, lo1, la2, lo2) {
+  const p1=la1*D2R, p2=la2*D2R, dl=(lo2-lo1)*D2R;
+  const y=Math.sin(dl)*Math.cos(p2);
+  const x=Math.cos(p1)*Math.sin(p2)-Math.sin(p1)*Math.cos(p2)*Math.cos(dl);
+  return (Math.atan2(y,x)*R2D+360)%360;
+}
+function destination(lat, lon, brgDeg, distM) {
+  const d=distM/EARTH_R, b=brgDeg*D2R, p1=lat*D2R, l1=lon*D2R;
+  const p2=Math.asin(Math.sin(p1)*Math.cos(d)+Math.cos(p1)*Math.sin(d)*Math.cos(b));
+  const l2=l1+Math.atan2(Math.sin(b)*Math.sin(d)*Math.cos(p1), Math.cos(d)-Math.sin(p1)*Math.sin(p2));
+  return [p2*R2D, ((l2*R2D+540)%360)-180];
+}
+/* Élévation apparente avec correction de courbure (d²/2R). */
+function elevationDeg(groundDistM, altDiffM) {
+  if (groundDistM < 1) return altDiffM >= 0 ? 90 : -90;
+  const drop = groundDistM*groundDistM/(2*EARTH_R);
+  return Math.atan2(altDiffM - drop, groundDistM)*R2D;
+}
+
+/* ================= Modèle avion + dead reckoning ================= */
+function positionAt(ac, now) {
+  const dt = Math.max(0, now - ac.t)/1000;
+  const dist = ac.gsKt*0.514444*dt;
+  return dist < 1 ? [ac.lat, ac.lon] : destination(ac.lat, ac.lon, ac.track, dist);
+}
+function altitudeAt(ac, now) {
+  const dt = Math.max(0, now - ac.t)/1000;
+  return ac.altM + ac.vsFpm*0.00508*dt;
+}
+
+/* ================= Réseau (adsb.lol, failover adsb.one) ================= */
+async function apiGet(path) {
+  for (const base of API_BASES) {
+    try {
+      const r = await fetch(base+path, {headers:{Accept:"application/json"}, signal: AbortSignal.timeout(12000)});
+      if (r.ok) return r.json();
+    } catch(e) {}
+  }
+  throw new Error("réseau");
+}
+
+async function pollAircraft() {
+  if (!S.user) return;
+  try {
+    const {lat, lon} = S.user;
+    const data = await apiGet(`/v2/point/${lat.toFixed(4)}/${lon.toFixed(4)}/${RADIUS_NM}`);
+    const now = Date.now();
+    const list = [];
+    for (const o of (data.ac || [])) {
+      if (typeof o.lat !== "number" || typeof o.lon !== "number") continue;
+      const altFt = (typeof o.alt_geom === "number") ? o.alt_geom
+                  : (typeof o.alt_baro === "number") ? o.alt_baro : null;
+      if (altFt === null) continue; // au sol ou sans altitude
+      list.push({
+        hex: o.hex || "?",
+        callsign: (o.flight || "").trim() || null,
+        type: (o.t || "").trim() || null,
+        reg: (o.r || "").trim() || null,
+        lat: o.lat, lon: o.lon,
+        altM: altFt*0.3048,
+        gsKt: typeof o.gs === "number" ? o.gs : 0,
+        track: typeof o.track === "number" ? o.track : (typeof o.true_heading === "number" ? o.true_heading : 0),
+        vsFpm: typeof o.geom_rate === "number" ? o.geom_rate : (typeof o.baro_rate === "number" ? o.baro_rate : 0),
+        t: now,
+      });
+    }
+    S.aircraft = list;
+    S.netError = false;
+    S.lastFetch = now;
+    fetchRoutes(list);
+  } catch(e) {
+    S.netError = true;
+  }
+  updateStatus();
+  refreshDetail();
+}
+
+/* Résolution callsign -> "CDG-JFK" (cache + cache négatif + cooldown si CORS/échec). */
+async function fetchRoutes(list) {
+  if (Date.now() < S.routesCooldownUntil) return;
+  const missing = list.filter(a => a.callsign && !S.routes.has(a.callsign)).slice(0, 30);
+  if (!missing.length) return;
+  try {
+    const r = await fetch(API_BASES[0]+"/api/0/routeset", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({planes: missing.map(a => ({callsign:a.callsign, lat:a.lat, lng:a.lon}))}),
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!r.ok) throw new Error();
+    for (const o of await r.json()) {
+      const cs = (o.callsign || "").trim();
+      if (!cs) continue;
+      const iata = (o._airport_codes_iata || "").trim();
+      S.routes.set(cs, (!iata || /unknown/i.test(iata)) ? "" : iata);
+    }
+  } catch(e) {
+    S.routesCooldownUntil = Date.now() + 60000; // on réessaie dans 1 min
+  }
+}
+
+/* ================= Capteurs ================= */
+function startLocation() {
+  navigator.geolocation.watchPosition(p => {
+    S.user = {
+      lat: p.coords.latitude, lon: p.coords.longitude,
+      altM: p.coords.altitude || 0, acc: p.coords.accuracy,
+    };
+    updateStatus();
+  }, e => { $("status").textContent = "GPS refusé : " + e.message; },
+  {enableHighAccuracy:true, maximumAge:2000, timeout:20000});
+}
+
+/* Orientation : alpha/beta/gamma -> matrice (spec W3C, Z-X'-Y'') ->
+   direction de la caméra arrière (-Z appareil) dans le repère monde
+   (X est, Y nord, Z haut). */
+function handleOrientation(e) {
+  let a = e.alpha, b = e.beta, g = e.gamma;
+  if (a == null || b == null || g == null) return;
+  if (typeof e.webkitCompassHeading === "number") a = 360 - e.webkitCompassHeading; // iOS
+  a*=D2R; b*=D2R; g*=D2R;
+  const cA=Math.cos(a), sA=Math.sin(a), cB=Math.cos(b), sB=Math.sin(b), cG=Math.cos(g), sG=Math.sin(g);
+  // Colonnes = axes appareil exprimés en repère monde
+  const xw = [cA*cG - sA*sB*sG, sA*cG + cA*sB*sG, -cB*sG];   // axe X appareil
+  const zw = [cA*sG + sA*sB*cG, sA*sG - cA*sB*cG,  cB*cG];   // axe Z appareil
+  const dir = [-zw[0], -zw[1], -zw[2]];                       // caméra arrière = -Z
+
+  const az = (Math.atan2(dir[0], dir[1])*R2D + 360) % 360;
+  const el = Math.asin(Math.max(-1, Math.min(1, dir[2])))*R2D;
+
+  // Roulis : angle de l'axe X appareil par rapport à l'horizon
+  let hR = [dir[1], -dir[0], 0];                              // "droite horizon" = dir × up
+  const n = Math.hypot(hR[0], hR[1]) || 1; hR = [hR[0]/n, hR[1]/n, 0];
+  const u = [hR[1]*dir[2]-hR[2]*dir[1], hR[2]*dir[0]-hR[0]*dir[2], hR[0]*dir[1]-hR[1]*dir[0]]; // hR × dir
+  const roll = Math.atan2(xw[0]*u[0]+xw[1]*u[1]+xw[2]*u[2], xw[0]*hR[0]+xw[1]*hR[1]+xw[2]*hR[2])*R2D;
+
+  const k = 0.22; // passe-bas
+  if (!S.cam.has) { S.cam = {az, el, roll, has:true}; return; }
+  const dAz = ((az - S.cam.az + 540)%360) - 180;
+  S.cam.az = (S.cam.az + k*dAz + 360)%360;
+  S.cam.el += k*(el - S.cam.el);
+  const dR = ((roll - S.cam.roll + 540)%360) - 180;
+  S.cam.roll = ((S.cam.roll + k*dR + 540)%360) - 180;
+}
+
+async function startOrientation() {
+  // iOS 13+ : demande de permission obligatoire (dans un geste utilisateur)
+  if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === "function") {
+    try { await DeviceOrientationEvent.requestPermission(); } catch(e) {}
+    window.addEventListener("deviceorientation", handleOrientation, true);
+  } else if ("ondeviceorientationabsolute" in window) {
+    window.addEventListener("deviceorientationabsolute", handleOrientation, true);
+  } else {
+    window.addEventListener("deviceorientation", handleOrientation, true);
+  }
+}
+
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: {facingMode:{ideal:"environment"}, width:{ideal:1920}}, audio:false
+  });
+  video.srcObject = stream;
+}
+
+/* ================= Rendu ================= */
+function resize() {
+  canvas.width = window.innerWidth * devicePixelRatio;
+  canvas.height = window.innerHeight * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+}
+window.addEventListener("resize", resize);
+
+function vFovDeg() {
+  const w = window.innerWidth, h = window.innerHeight;
+  return 2*Math.atan(Math.tan(S.hFov/2*D2R) * h/w)*R2D;
+}
+
+function draw() {
+  requestAnimationFrame(draw);
+  const w = window.innerWidth, h = window.innerHeight;
+  ctx.clearRect(0, 0, w, h);
+  S.hits = [];
+  if (S.arMode) drawAR(w, h); else drawRadar(w, h);
+}
+
+function drawAR(w, h) {
+  if (!S.user) { centerText(w, h, "En attente du GPS…"); return; }
+  if (!S.cam.has) { centerText(w, h, "En attente des capteurs… (bougez le téléphone)"); return; }
+  const now = Date.now();
+  const vF = vFovDeg();
+  const rollRad = -S.cam.roll*D2R, cR = Math.cos(rollRad), sR = Math.sin(rollRad);
+
+  for (const ac of S.aircraft) {
+    const [plat, plon] = positionAt(ac, now);
+    const gd = haversineM(S.user.lat, S.user.lon, plat, plon);
+    if (gd < 50) continue;
+    const brg = bearingDeg(S.user.lat, S.user.lon, plat, plon);
+    const el = elevationDeg(gd, altitudeAt(ac, now) - S.user.altM);
+    const dAz = ((brg - S.cam.az + 540)%360) - 180;
+    const dEl = el - S.cam.el;
+
+    const xo = dAz/S.hFov*w, yo = -dEl/vF*h;
+    const x = w/2 + xo*cR - yo*sR;
+    const y = h/2 + xo*sR + yo*cR;
+
+    if (x > -40 && x < w+40 && y > -40 && y < h+40) {
+      drawMarker(ac, x, y, gd, now);
+      S.hits.push({hex: ac.hex, x, y});
+    } else if (Math.abs(dAz) < 90 && Math.abs(dEl) < 70) {
+      drawEdgeArrow(w, h, x, y);
+    }
+  }
+}
+
+function drawMarker(ac, x, y, gd, now) {
+  const sel = ac.hex === S.selected;
+  const r = sel ? 15 : 11;
+  ctx.strokeStyle = sel ? "#FFD54F" : "#4FC3F7";
+  ctx.lineWidth = sel ? 3 : 2.2;
+  ctx.beginPath();
+  ctx.moveTo(x, y-r); ctx.lineTo(x+r, y); ctx.lineTo(x, y+r); ctx.lineTo(x-r, y);
+  ctx.closePath(); ctx.stroke();
+
+  const altFt = Math.round(altitudeAt(ac, now)/0.3048/100)*100;
+  const dKm = gd/1000;
+  const l1 = ac.callsign || ac.hex.toUpperCase();
+  const l2 = `${ac.type || "?"} · ${altFt} ft · ${dKm >= 10 ? Math.round(dKm) : dKm.toFixed(1)} km`;
+
+  ctx.font = "bold 15px system-ui"; const w1 = ctx.measureText(l1).width;
+  ctx.font = "12px system-ui";      const w2 = ctx.measureText(l2).width;
+  const bw = Math.max(w1, w2) + 20, bh = 44, bx = x - bw/2, by = y - r - 8 - bh;
+  ctx.fillStyle = "rgba(0,0,0,.68)";
+  roundRect(bx, by, bw, bh, 8); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+  ctx.font = "bold 15px system-ui"; ctx.fillText(l1, x, by+18);
+  ctx.fillStyle = "rgba(255,255,255,.82)";
+  ctx.font = "12px system-ui"; ctx.fillText(l2, x, by+35);
+}
+
+function drawEdgeArrow(w, h, x, y) {
+  const cx = w/2, cy = h/2, dx = x-cx, dy = y-cy;
+  if (!dx && !dy) return;
+  const m = 30;
+  const s = Math.min(dx ? (w/2-m)/Math.abs(dx) : 1e9, dy ? (h/2-m)/Math.abs(dy) : 1e9);
+  if (s >= 1) return;
+  const ex = cx+dx*s, ey = cy+dy*s, ang = Math.atan2(dy, dx);
+  ctx.save(); ctx.translate(ex, ey); ctx.rotate(ang);
+  ctx.fillStyle = "rgba(79,195,247,.8)";
+  ctx.beginPath(); ctx.moveTo(12,0); ctx.lineTo(-7,-8); ctx.lineTo(-7,8); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+function drawRadar(w, h) {
+  ctx.fillStyle = "#0a0f14"; ctx.fillRect(0, 0, w, h);
+  const cx = w/2, cy = h/2, R = Math.min(w, h)/2 - 34;
+  if (!S.user) { centerText(w, h, "En attente du GPS…"); return; }
+
+  ctx.strokeStyle = "rgba(72,255,176,.22)"; ctx.lineWidth = 1;
+  ctx.font = "12px system-ui"; ctx.textAlign = "left";
+  for (let i=1; i<=3; i++) {
+    const r = R*i/3;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2*Math.PI); ctx.stroke();
+    ctx.fillStyle = "rgba(72,255,176,.55)";
+    ctx.fillText(`${Math.round(RANGE_KM*i/3)} km`, cx + r*0.707 + 5, cy - r*0.707 - 5);
+  }
+  ctx.beginPath(); ctx.moveTo(cx-R, cy); ctx.lineTo(cx+R, cy);
+  ctx.moveTo(cx, cy-R); ctx.lineTo(cx, cy+R); ctx.stroke();
+  ctx.fillStyle = "rgba(72,255,176,.85)"; ctx.textAlign = "center";
+  ctx.font = "bold 15px system-ui"; ctx.fillText("N", cx, cy-R-8);
+
+  // Secteur de visée caméra
+  if (S.cam.has) {
+    const a0 = (S.cam.az - 90 - 25)*D2R, a1 = (S.cam.az - 90 + 25)*D2R;
+    ctx.fillStyle = "rgba(79,195,247,.14)";
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, R, a0, a1); ctx.closePath(); ctx.fill();
+  }
+
+  const now = Date.now();
+  const rangeM = RANGE_KM*1000;
+  const mLat = 111320, mLon = 111320*Math.cos(S.user.lat*D2R);
+
+  for (const ac of S.aircraft) {
+    const [plat, plon] = positionAt(ac, now);
+    const dN = (plat - S.user.lat)*mLat, dE = (plon - S.user.lon)*mLon;
+    if (Math.hypot(dN, dE) > rangeM*1.02) continue;
+    const px = cx + dE/rangeM*R, py = cy - dN/rangeM*R;
+
+    const alt = altitudeAt(ac, now);
+    ctx.fillStyle = alt < 3000 ? "#FFB74D" : alt < 8000 ? "#4FC3F7" : "#B39DDB";
+    ctx.save(); ctx.translate(px, py); ctx.rotate(ac.track*D2R);
+    ctx.beginPath(); ctx.moveTo(0,-8); ctx.lineTo(-5.5,6); ctx.lineTo(5.5,6); ctx.closePath(); ctx.fill();
+    if (ac.hex === S.selected) { ctx.strokeStyle = "#FFD54F"; ctx.lineWidth = 2.5; ctx.stroke(); }
+    ctx.restore();
+    if (ac.callsign) {
+      ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.font = "11px system-ui"; ctx.textAlign = "center";
+      ctx.fillText(ac.callsign, px, py+20);
+    }
+    S.hits.push({hex: ac.hex, x: px, y: py});
+  }
+  ctx.fillStyle = "#48FFB0";
+  ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 2*Math.PI); ctx.fill();
+}
+
+function centerText(w, h, t) {
+  ctx.fillStyle = "rgba(255,255,255,.7)"; ctx.font = "17px system-ui"; ctx.textAlign = "center";
+  ctx.fillText(t, w/2, h/2);
+}
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y); ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r); ctx.closePath();
+}
+
+/* ================= UI ================= */
+canvas.addEventListener("pointerup", e => {
+  let best = null, bd = 55;
+  for (const hit of S.hits) {
+    const d = Math.hypot(e.clientX - hit.x, e.clientY - hit.y);
+    if (d < bd) { bd = d; best = hit; }
+  }
+  S.selected = (best && best.hex !== S.selected) ? best.hex : null;
+  refreshDetail();
+});
+
+$("modeBtn").addEventListener("click", () => {
+  S.arMode = !S.arMode;
+  $("modeBtn").textContent = S.arMode ? "Radar" : "Caméra (AR)";
+  video.style.display = S.arMode ? "" : "none";
+  $("fovBox").style.display = S.arMode ? "" : "none";
+});
+
+function setFov(v) {
+  S.hFov = Math.max(30, Math.min(85, v));
+  localStorage.setItem("hFov", S.hFov);
+  $("fovLabel").textContent = `FOV ${S.hFov}°`;
+}
+$("fovMinus").addEventListener("click", () => setFov(S.hFov - 2));
+$("fovPlus").addEventListener("click", () => setFov(S.hFov + 2));
+setFov(S.hFov);
+
+function updateStatus() {
+  const p = [];
+  p.push(`${S.aircraft.length} avion${S.aircraft.length > 1 ? "s" : ""}`);
+  p.push(`rayon ${Math.round(RANGE_KM)} km`);
+  if (S.user && S.user.acc) p.push(`GPS ±${Math.round(S.user.acc)} m`);
+  if (S.netError) p.push("réseau ?");
+  $("status").textContent = p.join(" · ");
+}
+
+function refreshDetail() {
+  const ac = S.selected ? S.aircraft.find(a => a.hex === S.selected) : null;
+  const el = $("detail");
+  if (!ac) { el.style.display = "none"; return; }
+  el.style.display = "block";
+  const now = Date.now();
+  el.querySelector(".l1").textContent =
+    [ac.callsign || ac.hex.toUpperCase(), ac.type, ac.reg].filter(Boolean).join(" · ");
+  const route = ac.callsign ? S.routes.get(ac.callsign) : null;
+  el.querySelector(".l2").textContent = route || "Route inconnue";
+  const altFt = Math.round(altitudeAt(ac, now)/0.3048);
+  const vs = Math.round(ac.vsFpm);
+  const vsT = vs > 100 ? `↑ ${vs} ft/min` : vs < -100 ? `↓ ${-vs} ft/min` : "palier";
+  let dT = "";
+  if (S.user) {
+    const [plat, plon] = positionAt(ac, now);
+    const d = haversineM(S.user.lat, S.user.lon, plat, plon)/1000;
+    const b = Math.round(bearingDeg(S.user.lat, S.user.lon, plat, plon));
+    dT = ` · ${d >= 10 ? Math.round(d) : d.toFixed(1)} km, cap ${b}°`;
+  }
+  el.querySelector(".l3").textContent =
+    `${altFt} ft (${Math.round(altFt*0.3048)} m) · ${Math.round(ac.gsKt)} kt · ${vsT}${dT}`;
+}
+
+/* ================= Démarrage ================= */
+$("startBtn").addEventListener("click", async () => {
+  const err = $("err");
+  err.textContent = "";
+  try {
+    await startOrientation();       // d'abord (geste utilisateur requis sur iOS)
+    await startCamera();
+    startLocation();
+    $("startScreen").style.display = "none";
+    resize();
+    try { await screen.orientation.lock("portrait"); } catch(e) {}
+    try { await navigator.wakeLock.request("screen"); } catch(e) {}
+    setInterval(pollAircraft, POLL_MS);
+    pollAircraft();
+    requestAnimationFrame(draw);
+  } catch(e) {
+    err.textContent = "Erreur : " + e.message +
+      " — vérifiez que la page est servie en HTTPS et que les permissions caméra/position sont accordées.";
+  }
+});
+</script>
+</body>
+</html>

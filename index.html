@@ -196,6 +196,8 @@ const AIRLINES = {
   FDX:"FedEx", UPS:"UPS", GEC:"Lufthansa Cargo", CLX:"Cargolux",
   BCS:"DHL (EAT)", GTI:"Atlas Air",
   NJE:"NetJets Europe", VJT:"VistaJet", AIB:"Airbus Industrie",
+  FPO:"ASL Airlines France", CTM:"COTAM (Armée de l'air)", FAF:"Armée de l'air",
+  JFA:"Jetfly", OYO:"Oyonnair",
 };
 
 /* Code type OACI -> nom de modèle (repli quand le flux n'a pas de "desc"). */
@@ -429,6 +431,21 @@ async function fetchRoutes(list) {
             storeRoute(a.callsign, await r.json());
             ok = true;
             break;
+          } catch(e) {}
+        }
+        // Ultime recours : HexDB (fournisseur indépendant, CORS ouvert).
+        if (!S.routes.has(a.callsign)) {
+          try {
+            const r = await fetch("https://hexdb.io/api/v1/route/icao/" + encodeURIComponent(a.callsign),
+              {signal: AbortSignal.timeout(8000)});
+            if (r.ok) {
+              const h = await r.json();
+              const codes = ((h && h.route) || "").split("-").map(s => s.trim()).filter(Boolean);
+              if (codes.length >= 2 && !/unknown/i.test(h.route)) {
+                storeRoute(a.callsign, {callsign: a.callsign, _airport_codes_iata: codes.join("-")});
+                ok = true;
+              }
+            }
           } catch(e) {}
         }
         await new Promise(res => setTimeout(res, 400));

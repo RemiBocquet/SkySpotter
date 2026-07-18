@@ -115,9 +115,11 @@ const S = {
   cam: { az: 0, el: 0, roll: 0, has: false },
   hFov: parseFloat(localStorage.getItem("hFov") || "55"),
   aircraft: [],              // liste courante
-  routes: new Map(),         // callsign -> "CDG-JFK" | "" (inconnue)
-  routesCooldownUntil: 0,
+  routes: new Map(),         // callsign -> "Ville (XXX) – Ville (YYY)" | "" (inconnue)
+  routesBusy: false,
   routesStatus: "idle",      // idle | ok | fail
+  failStreak: 0,             // échecs consécutifs du polling (backoff)
+  skipUntil: 0,
   selected: null,            // hex
   hits: [],                  // zones cliquables du dernier rendu
   netError: false,
@@ -186,9 +188,12 @@ async function fetchPoint(lat, lon, radiusNm) {
 
 async function pollAircraft() {
   if (!S.user) return;
+  if (Date.now() < S.skipUntil) return; // backoff après échecs (rate limiting)
   try {
     const {lat, lon} = S.user;
     const data = await fetchPoint(lat, lon, RADIUS_NM);
+    S.failStreak = 0;
+    S.skipUntil = 0;
     const now = Date.now();
     const list = [];
     for (const o of (data.ac || [])) {
@@ -215,51 +220,54 @@ async function pollAircraft() {
     fetchRoutes(list);
   } catch(e) {
     S.netError = true;
+    S.failStreak++;
+    // 10 s, 20 s, 40 s… plafonné à 60 s : laisser retomber le rate limiting
+    S.skipUntil = Date.now() + Math.min(60000, 10000 * 2 ** (S.failStreak - 1));
   }
   updateStatus();
   refreshDetail();
 }
 
-/* Résolution callsign -> "CDG-JFK". Essaie adsb.lol direct (leur endpoint
-   routeset envoie les en-têtes CORS) puis le worker en secours.
-   S.routesStatus : "idle" | "ok" | "fail" — affiché dans l'UI. */
+/* Résolution des routes via GET /api/0/route/{callsign}/{lat}/{lng}
+   (simple request, pas de preflight CORS). 5 indicatifs max par cycle,
+   arrêt immédiat du cycle au premier échec réseau pour ne pas aggraver
+   un éventuel rate limiting. */
+function storeRoute(callsign, o) {
+  const iata = ((o && o._airport_codes_iata) || "").trim();
+  if (!iata || /unknown/i.test(iata)) { S.routes.set(callsign, ""); return; }
+  const aps = Array.isArray(o._airports) ? o._airports : [];
+  const label = aps.length >= 2
+    ? aps.map(a => `${(a.location || a.name || a.icao || "?").trim()} (${a.iata || a.icao || "?"})`).join(" – ")
+    : iata;
+  S.routes.set(callsign, label);
+}
+
 async function fetchRoutes(list) {
-  if (Date.now() < S.routesCooldownUntil) return;
-  const missing = list.filter(a => a.callsign && !S.routes.has(a.callsign)).slice(0, 30);
+  if (S.routesBusy) return;
+  const missing = list.filter(a => a.callsign && !S.routes.has(a.callsign)).slice(0, 5);
   if (!missing.length) return;
-  const body = JSON.stringify({planes: missing.map(a => ({callsign:a.callsign, lat:a.lat, lng:a.lon}))});
-  const targets = ["https://api.adsb.lol/api/0/routeset"];
-  if (WORKER_BASE) targets.push(WORKER_BASE + "/routeset");
-  for (const target of targets) {
-    try {
-      const r = await fetch(target, {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body,
-        signal: AbortSignal.timeout(12000),
-      });
-      if (!r.ok) continue;
-      const arr = await r.json();
-      if (!Array.isArray(arr)) continue;
-      for (const o of arr) {
-        const cs = (o.callsign || "").trim();
-        if (!cs) continue;
-        const iata = (o._airport_codes_iata || "").trim();
-        if (!iata || /unknown/i.test(iata)) { S.routes.set(cs, ""); continue; }
-        // "Ville (CDG) – Ville (JFK)" à partir des détails d'aéroports,
-        // sinon repli sur les codes bruts.
-        const aps = Array.isArray(o._airports) ? o._airports : [];
-        const label = aps.length >= 2
-          ? aps.map(a => `${(a.location || a.name || a.icao || "?").trim()} (${a.iata || a.icao || "?"})`).join(" – ")
-          : iata;
-        S.routes.set(cs, label);
+  S.routesBusy = true;
+  try {
+    for (const a of missing) {
+      const path = `/route/${encodeURIComponent(a.callsign)}/${a.lat.toFixed(3)}/${a.lon.toFixed(3)}`;
+      const targets = ["https://api.adsb.lol/api/0" + path];
+      if (WORKER_BASE) targets.push(WORKER_BASE + path);
+      let done = false;
+      for (const u of targets) {
+        try {
+          const r = await fetch(u, {signal: AbortSignal.timeout(10000)});
+          if (!r.ok) continue;
+          storeRoute(a.callsign, await r.json());
+          S.routesStatus = "ok";
+          done = true;
+          break;
+        } catch(e) {}
       }
-      S.routesStatus = "ok";
-      return;
-    } catch(e) {}
+      if (!done) { S.routesStatus = "fail"; break; }
+    }
+  } finally {
+    S.routesBusy = false;
   }
-  S.routesStatus = "fail";
-  S.routesCooldownUntil = Date.now() + 60000; // on réessaie dans 1 min
 }
 
 /* ================= Capteurs ================= */

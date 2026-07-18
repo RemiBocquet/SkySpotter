@@ -63,12 +63,34 @@
      L'application a besoin de la caméra, de la position et des capteurs d'orientation.
      Tenez le téléphone en portrait.</p>
   <button id="startBtn" class="btn">Démarrer</button>
+  <div id="workerState" style="font-size:12px;color:rgba(255,255,255,.45)"></div>
   <div id="err"></div>
 </div>
 
 <script>
 "use strict";
-const WORKER_BASE = "https://skyspotter.bocquet-remi98.workers.dev";
+
+/* ============================================================
+   ⚙ CONFIGURATION du relais Cloudflare Worker — SANS éditer ce
+   fichier : ouvre une fois la page avec ?worker=URL, ex. :
+   https://tonsite.github.io/skyspotter/?worker=https://skyspotter.x.workers.dev
+   L'URL est mémorisée (localStorage). ?worker= (vide) pour effacer.
+   ============================================================ */
+(() => {
+  const qp = new URLSearchParams(location.search).get("worker");
+  if (qp !== null) {
+    if (qp.trim()) localStorage.setItem("workerBase", qp.trim());
+    else localStorage.removeItem("workerBase");
+  }
+})();
+const WORKER_BASE = (localStorage.getItem("workerBase")
+  || "https://skyspotter.bocquet-remi98.workers.dev").replace(/\/+$/, "");
+
+/* Affiche toute erreur JS à l'écran (pas de console sur mobile). */
+window.addEventListener("error", e => {
+  const el = document.getElementById("err");
+  if (el) el.textContent = "Erreur JS : " + e.message;
+});
 
 /* ================= Constantes & état ================= */
 const EARTH_R = 6371000;
@@ -462,4 +484,62 @@ setFov(S.hFov);
 
 function updateStatus() {
   const p = [];
-  p.push(`${S.aircraft.length} avion${S.air
+  p.push(`${S.aircraft.length} avion${S.aircraft.length > 1 ? "s" : ""}`);
+  p.push(`rayon ${Math.round(RANGE_KM)} km`);
+  if (S.user && S.user.acc) p.push(`GPS ±${Math.round(S.user.acc)} m`);
+  if (S.netError) p.push("⚠ aucune source ne répond");
+  else if (S.srcIdx > 0) p.push(SOURCES[S.srcIdx].name);
+  $("status").textContent = p.join(" · ");
+}
+
+function refreshDetail() {
+  const ac = S.selected ? S.aircraft.find(a => a.hex === S.selected) : null;
+  const el = $("detail");
+  if (!ac) { el.style.display = "none"; return; }
+  el.style.display = "block";
+  const now = Date.now();
+  el.querySelector(".l1").textContent =
+    [ac.callsign || ac.hex.toUpperCase(), ac.type, ac.reg].filter(Boolean).join(" · ");
+  const route = ac.callsign ? S.routes.get(ac.callsign) : null;
+  el.querySelector(".l2").textContent = route || "Route inconnue";
+  const altFt = Math.round(altitudeAt(ac, now)/0.3048);
+  const vs = Math.round(ac.vsFpm);
+  const vsT = vs > 100 ? `↑ ${vs} ft/min` : vs < -100 ? `↓ ${-vs} ft/min` : "palier";
+  let dT = "";
+  if (S.user) {
+    const [plat, plon] = positionAt(ac, now);
+    const d = haversineM(S.user.lat, S.user.lon, plat, plon)/1000;
+    const b = Math.round(bearingDeg(S.user.lat, S.user.lon, plat, plon));
+    dT = ` · ${d >= 10 ? Math.round(d) : d.toFixed(1)} km, cap ${b}°`;
+  }
+  el.querySelector(".l3").textContent =
+    `${altFt} ft (${Math.round(altFt*0.3048)} m) · ${Math.round(ac.gsKt)} kt · ${vsT}${dT}`;
+}
+
+/* ================= Démarrage ================= */
+$("workerState").textContent = WORKER_BASE
+  ? "Relais : " + WORKER_BASE.replace(/^https?:\/\//, "")
+  : "Relais worker non configuré (sources publiques)";
+
+$("startBtn").addEventListener("click", async () => {
+  const err = $("err");
+  err.textContent = "";
+  try {
+    await startOrientation();       // d'abord (geste utilisateur requis sur iOS)
+    await startCamera();
+    startLocation();
+    $("startScreen").style.display = "none";
+    resize();
+    try { await screen.orientation.lock("portrait"); } catch(e) {}
+    try { await navigator.wakeLock.request("screen"); } catch(e) {}
+    setInterval(pollAircraft, POLL_MS);
+    pollAircraft();
+    requestAnimationFrame(draw);
+  } catch(e) {
+    err.textContent = "Erreur : " + e.message +
+      " — vérifiez que la page est servie en HTTPS et que les permissions caméra/position sont accordées.";
+  }
+});
+</script>
+</body>
+</html>

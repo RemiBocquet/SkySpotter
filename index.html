@@ -664,12 +664,23 @@ function ensureMap() {
   if (map || typeof L === "undefined" || !S.user) return;
   if (!S.arMode) $("mapLoading").style.display = "block";
   map = L.map("map", { zoomControl: false });
-  const tiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+  map.setView([S.user.lat, S.user.lon], 10); // vue initiale OBLIGATOIRE avant le reste
+  const hideLoading = () => { tilesReady = true; $("mapLoading").style.display = "none"; };
+  const tiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", {
     maxZoom: 19, subdomains: "abcd",
     attribution: "&copy; OpenStreetMap &copy; CARTO",
   }).addTo(map);
-  const hideLoading = () => { tilesReady = true; $("mapLoading").style.display = "none"; };
   tiles.on("load", hideLoading);      // premières tuiles affichées
+  // Si le fond CARTO est bloqué (DNS filtrant, panne), bascule sur OSM.
+  let tileErrors = 0;
+  tiles.on("tileerror", () => {
+    if (++tileErrors === 6 && !tilesReady) {
+      map.removeLayer(tiles);
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19, attribution: "&copy; OpenStreetMap",
+      }).addTo(map).on("load", hideLoading);
+    }
+  });
   setTimeout(hideLoading, 15000);     // garde-fou si l'événement ne vient pas
   userMarker = L.circleMarker([S.user.lat, S.user.lon],
     { radius: 7, color: "#48FFB0", fillColor: "#48FFB0", fillOpacity: 1, weight: 2 }).addTo(map);
@@ -677,7 +688,7 @@ function ensureMap() {
     { radius: rangeKm() * 1000, color: "#48FFB0", weight: 1, opacity: .35, fillOpacity: .03,
       interactive: false }).addTo(map);
   map.on("click", () => selectHex(null));
-  map.fitBounds(rangeCircle.getBounds(), { padding: [20, 20] });
+  try { map.fitBounds(rangeCircle.getBounds(), { padding: [20, 20] }); } catch (e) {}
   mapFitted = true;
 }
 
@@ -851,7 +862,7 @@ setFov(S.hFov);
     localStorage.setItem("radiusNm", S.radiusNm);
     if (rangeCircle) {
       rangeCircle.setRadius(rangeKm() * 1000);
-      map.fitBounds(rangeCircle.getBounds(), { padding: [20, 20] });
+      try { map.fitBounds(rangeCircle.getBounds(), { padding: [20, 20] }); } catch (e) {}
     }
     S.skipUntil = 0;
     S.failStreak = 0;

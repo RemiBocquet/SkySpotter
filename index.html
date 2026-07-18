@@ -71,6 +71,12 @@
 <script>
 "use strict";
 
+/* ============================================================
+   ⚙ CONFIGURATION du relais Cloudflare Worker — SANS éditer ce
+   fichier : ouvre une fois la page avec ?worker=URL, ex. :
+   https://tonsite.github.io/skyspotter/?worker=https://skyspotter.x.workers.dev
+   L'URL est mémorisée (localStorage). ?worker= (vide) pour effacer.
+   ============================================================ */
 (() => {
   const qp = new URLSearchParams(location.search).get("worker");
   if (qp !== null) {

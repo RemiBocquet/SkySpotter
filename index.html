@@ -8,6 +8,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>SkySpotter</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html, body { height:100%; overflow:hidden; background:#0a0f14; font-family:system-ui,-apple-system,sans-serif; color:#fff; }
@@ -32,6 +34,18 @@
     background:rgba(79,195,247,.9); color:#00141f; font-size:15px; font-weight:700;
   }
   #modeBtn { right:16px; bottom:calc(env(safe-area-inset-bottom,0px) + 16px); }
+  #map { position:fixed; inset:0; display:none; background:#0a0f14; z-index:1; }
+  .pwrap { background:none !important; border:none !important; }
+  .pmark { width:22px; height:22px; margin:0 auto; font-size:19px; line-height:22px;
+    text-align:center; text-shadow:0 0 3px rgba(0,0,0,.9); }
+  .plabel { font-size:11px; color:rgba(255,255,255,.9); text-align:center;
+    text-shadow:0 1px 3px #000, 0 0 6px #000; white-space:nowrap; }
+  #rangeBox {
+    position:fixed; left:16px; bottom:calc(env(safe-area-inset-bottom,0px) + 16px); z-index:6;
+    background:rgba(16,24,32,.85); border-radius:22px; padding:8px 14px; font-size:13px;
+    display:none; gap:10px; align-items:center; color:rgba(255,255,255,.85);
+  }
+  #rangeBox input { width:130px; accent-color:#4FC3F7; }
   #fovBox {
     position:fixed; left:16px; bottom:calc(env(safe-area-inset-bottom,0px) + 16px); z-index:6;
     background:rgba(16,24,32,.8); border-radius:22px; padding:6px 10px; font-size:13px;
@@ -55,8 +69,10 @@
 <canvas id="overlay"></canvas>
 <div id="status">Démarrage…</div>
 <div id="detail"><div class="l1"></div><div class="l2"></div><div class="l2b"></div><div class="l3"></div></div>
-<button id="modeBtn" class="btn">Radar</button>
+<div id="map"></div>
+<button id="modeBtn" class="btn">Carte</button>
 <div id="fovBox"><button id="fovMinus">−</button><span id="fovLabel">FOV 55°</span><button id="fovPlus">+</button></div>
+<div id="rangeBox"><span>Rayon</span><input id="rangeSlider" type="range" min="20" max="300" step="10"><span id="rangeLabel"></span></div>
 
 <div id="startScreen">
   <h1>✈ SkySpotter</h1>
@@ -95,8 +111,6 @@ window.addEventListener("error", e => {
 
 /* ================= Constantes & état ================= */
 const EARTH_R = 6371000;
-const RADIUS_NM = 40;                       // rayon de recherche (≈ 74 km)
-const RANGE_KM = RADIUS_NM * 1.852;
 const POLL_MS = 8000;
 /* Sources de données, testées dans l'ordre ; la première qui répond est
    mémorisée. Les endpoints /v2 d'adsb.lol n'envoient pas d'en-têtes CORS,
@@ -127,6 +141,8 @@ const S = {
   hits: [],                  // zones cliquables du dernier rendu
   netError: false,
   lastFetch: 0,
+  radiusNm: Math.max(10, parseInt(localStorage.getItem("radiusNm") || "40", 10) || 40),
+  trails: new Map(),   // hex -> [[lat, lon, t], ...] positions reçues (pas extrapolées)
   srcIdx: -1,          // source active (-1 = pas encore trouvée)
   lastTopTry: 0,       // dernier ré-essai de la source prioritaire (worker)
 };
@@ -134,6 +150,7 @@ const S = {
 const $ = id => document.getElementById(id);
 const video = $("video"), canvas = $("overlay"), ctx = canvas.getContext("2d");
 const D2R = Math.PI/180, R2D = 180/Math.PI;
+const rangeKm = () => S.radiusNm * 1.852;
 
 /* ================= Géodésie ================= */
 function haversineM(la1, lo1, la2, lo2) {
@@ -318,7 +335,7 @@ async function pollAircraft() {
   if (Date.now() < S.skipUntil) return; // backoff après échecs (rate limiting)
   try {
     const {lat, lon} = S.user;
-    const data = await fetchPoint(lat, lon, RADIUS_NM);
+    const data = await fetchPoint(lat, lon, S.radiusNm);
     S.failStreak = 0;
     S.skipUntil = 0;
     const now = Date.now();
@@ -345,8 +362,10 @@ async function pollAircraft() {
       });
     }
     S.aircraft = list;
+    recordTrails(list, now);
     S.netError = false;
     S.lastFetch = now;
+    if (!S.arMode) { mapRefresh(); updateTrail(); }
     fetchRoutes(list);
   } catch(e) {
     S.netError = true;
@@ -545,10 +564,11 @@ function vFovDeg() {
 
 function draw() {
   requestAnimationFrame(draw);
+  if (!S.arMode) return; // en mode carte, Leaflet gère l'affichage
   const w = window.innerWidth, h = window.innerHeight;
   ctx.clearRect(0, 0, w, h);
   S.hits = [];
-  if (S.arMode) drawAR(w, h); else drawRadar(w, h);
+  drawAR(w, h);
 }
 
 function drawAR(w, h) {
@@ -618,56 +638,129 @@ function drawEdgeArrow(w, h, x, y) {
   ctx.restore();
 }
 
-function drawRadar(w, h) {
-  ctx.fillStyle = "#0a0f14"; ctx.fillRect(0, 0, w, h);
-  const cx = w/2, cy = h/2, R = Math.min(w, h)/2 - 34;
-  if (!S.user) { centerText(w, h, "En attente du GPS…"); return; }
+/* ================= Carte (Leaflet) ================= */
+let map = null, userMarker = null, rangeCircle = null, sectorPoly = null;
+let trailLine = null, predLine = null, mapFitted = false;
+const planeMarkers = new Map(); // hex -> L.marker
 
-  ctx.strokeStyle = "rgba(72,255,176,.22)"; ctx.lineWidth = 1;
-  ctx.font = "12px system-ui"; ctx.textAlign = "left";
-  for (let i=1; i<=3; i++) {
-    const r = R*i/3;
-    ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2*Math.PI); ctx.stroke();
-    ctx.fillStyle = "rgba(72,255,176,.55)";
-    ctx.fillText(`${Math.round(RANGE_KM*i/3)} km`, cx + r*0.707 + 5, cy - r*0.707 - 5);
-  }
-  ctx.beginPath(); ctx.moveTo(cx-R, cy); ctx.lineTo(cx+R, cy);
-  ctx.moveTo(cx, cy-R); ctx.lineTo(cx, cy+R); ctx.stroke();
-  ctx.fillStyle = "rgba(72,255,176,.85)"; ctx.textAlign = "center";
-  ctx.font = "bold 15px system-ui"; ctx.fillText("N", cx, cy-R-8);
-
-  // Secteur de visée caméra
-  if (S.cam.has) {
-    const a0 = (S.cam.az - 90 - 25)*D2R, a1 = (S.cam.az - 90 + 25)*D2R;
-    ctx.fillStyle = "rgba(79,195,247,.14)";
-    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, R, a0, a1); ctx.closePath(); ctx.fill();
-  }
-
-  const now = Date.now();
-  const rangeM = RANGE_KM*1000;
-  const mLat = 111320, mLon = 111320*Math.cos(S.user.lat*D2R);
-
-  for (const ac of S.aircraft) {
-    const [plat, plon] = positionAt(ac, now);
-    const dN = (plat - S.user.lat)*mLat, dE = (plon - S.user.lon)*mLon;
-    if (Math.hypot(dN, dE) > rangeM*1.02) continue;
-    const px = cx + dE/rangeM*R, py = cy - dN/rangeM*R;
-
-    const alt = altitudeAt(ac, now);
-    ctx.fillStyle = alt < 3000 ? "#FFB74D" : alt < 8000 ? "#4FC3F7" : "#B39DDB";
-    ctx.save(); ctx.translate(px, py); ctx.rotate(ac.track*D2R);
-    ctx.beginPath(); ctx.moveTo(0,-8); ctx.lineTo(-5.5,6); ctx.lineTo(5.5,6); ctx.closePath(); ctx.fill();
-    if (ac.hex === S.selected) { ctx.strokeStyle = "#FFD54F"; ctx.lineWidth = 2.5; ctx.stroke(); }
-    ctx.restore();
-    if (ac.callsign) {
-      ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.font = "11px system-ui"; ctx.textAlign = "center";
-      ctx.fillText(ac.callsign, px, py+20);
-    }
-    S.hits.push({hex: ac.hex, x: px, y: py});
-  }
-  ctx.fillStyle = "#48FFB0";
-  ctx.beginPath(); ctx.arc(cx, cy, 5, 0, 2*Math.PI); ctx.fill();
+function altColor(altM) {
+  return altM < 3000 ? "#FFB74D" : altM < 8000 ? "#4FC3F7" : "#B39DDB";
 }
+
+function ensureMap() {
+  if (map || typeof L === "undefined" || !S.user) return;
+  map = L.map("map", { zoomControl: false });
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    maxZoom: 19, subdomains: "abcd",
+    attribution: "&copy; OpenStreetMap &copy; CARTO",
+  }).addTo(map);
+  userMarker = L.circleMarker([S.user.lat, S.user.lon],
+    { radius: 7, color: "#48FFB0", fillColor: "#48FFB0", fillOpacity: 1, weight: 2 }).addTo(map);
+  rangeCircle = L.circle([S.user.lat, S.user.lon],
+    { radius: rangeKm() * 1000, color: "#48FFB0", weight: 1, opacity: .35, fillOpacity: .03,
+      interactive: false }).addTo(map);
+  map.on("click", () => selectHex(null));
+}
+
+function planeIcon(ac, color) {
+  const sel = ac.hex === S.selected;
+  return L.divIcon({
+    className: "pwrap",
+    html: `<div class="pmark" style="color:${sel ? "#FFD54F" : color};` +
+          `transform:rotate(${Math.round(ac.track)}deg)">\u25B2</div>` +
+          `<div class="plabel">${ac.callsign || ""}</div>`,
+    iconSize: [80, 38], iconAnchor: [40, 11],
+  });
+}
+
+function mapRefresh() {
+  if (S.arMode || !map) return;
+  const now = Date.now();
+  if (S.user) {
+    userMarker.setLatLng([S.user.lat, S.user.lon]);
+    rangeCircle.setLatLng([S.user.lat, S.user.lon]);
+  }
+  const seen = new Set();
+  for (const ac of S.aircraft) {
+    seen.add(ac.hex);
+    const pos = positionAt(ac, now);
+    const color = altColor(altitudeAt(ac, now));
+    let mk = planeMarkers.get(ac.hex);
+    if (!mk) {
+      mk = L.marker(pos, { icon: planeIcon(ac, color) }).addTo(map);
+      const hex = ac.hex;
+      mk.on("click", e => { L.DomEvent.stopPropagation(e); selectHex(hex); });
+      mk._sig = "";
+      planeMarkers.set(ac.hex, mk);
+    }
+    mk.setLatLng(pos);
+    const sig = `${Math.round(ac.track / 4) * 4}|${color}|${ac.hex === S.selected}|${ac.callsign || ""}`;
+    if (mk._sig !== sig) { mk.setIcon(planeIcon(ac, color)); mk._sig = sig; }
+  }
+  for (const [hex, mk] of planeMarkers) {
+    if (!seen.has(hex)) { map.removeLayer(mk); planeMarkers.delete(hex); }
+  }
+  updateSector();
+}
+
+function updateSector() {
+  if (!map || !S.user || !S.cam.has) return;
+  const pts = [[S.user.lat, S.user.lon]];
+  for (let a = -25; a <= 25; a += 5) {
+    pts.push(destination(S.user.lat, S.user.lon, S.cam.az + a, rangeKm() * 1000));
+  }
+  if (sectorPoly) sectorPoly.setLatLngs(pts);
+  else sectorPoly = L.polygon(pts,
+    { color: "#4FC3F7", weight: 0, fillOpacity: .10, interactive: false }).addTo(map);
+}
+
+/* Trace de l'avion sélectionné : historique observé (trait plein)
+   + projection 2 min (pointillés). */
+function updateTrail() {
+  if (!map) return;
+  if (trailLine) { map.removeLayer(trailLine); trailLine = null; }
+  if (predLine) { map.removeLayer(predLine); predLine = null; }
+  if (!S.selected) return;
+  const hist = (S.trails.get(S.selected) || []).map(p => [p[0], p[1]]);
+  const ac = S.aircraft.find(a => a.hex === S.selected);
+  const now = Date.now();
+  if (ac) hist.push(positionAt(ac, now));
+  if (hist.length >= 2) {
+    trailLine = L.polyline(hist,
+      { color: "#FFD54F", weight: 3, opacity: .85, interactive: false }).addTo(map);
+  }
+  if (ac) {
+    const cur = positionAt(ac, now);
+    const fut = destination(cur[0], cur[1], ac.track, ac.gsKt * 0.514444 * 120);
+    predLine = L.polyline([cur, fut],
+      { color: "#FFD54F", weight: 2, opacity: .55, dashArray: "6 9", interactive: false }).addTo(map);
+  }
+}
+
+function recordTrails(list, now) {
+  for (const ac of list) {
+    let arr = S.trails.get(ac.hex);
+    if (!arr) { arr = []; S.trails.set(ac.hex, arr); }
+    const last = arr[arr.length - 1];
+    if (!last || last[0] !== ac.lat || last[1] !== ac.lon) {
+      arr.push([ac.lat, ac.lon, now]);
+      if (arr.length > 600) arr.shift();
+    }
+  }
+  // Purge des avions disparus depuis > 10 min
+  for (const [hex, arr] of S.trails) {
+    if (now - arr[arr.length - 1][2] > 600000) S.trails.delete(hex);
+  }
+}
+
+function selectHex(hex) {
+  S.selected = (hex && hex !== S.selected) ? hex : null;
+  refreshDetail();
+  updateTrail();
+  if (!S.arMode) mapRefresh(); // rafraîchir la surbrillance du marqueur
+}
+
+setInterval(() => { if (!S.arMode && map) { mapRefresh(); updateTrail(); } }, 1000);
 
 function centerText(w, h, t) {
   ctx.fillStyle = "rgba(255,255,255,.7)"; ctx.font = "17px system-ui"; ctx.textAlign = "center";
@@ -686,15 +779,29 @@ canvas.addEventListener("pointerup", e => {
     const d = Math.hypot(e.clientX - hit.x, e.clientY - hit.y);
     if (d < bd) { bd = d; best = hit; }
   }
-  S.selected = (best && best.hex !== S.selected) ? best.hex : null;
-  refreshDetail();
+  selectHex(best ? best.hex : null);
 });
 
 $("modeBtn").addEventListener("click", () => {
   S.arMode = !S.arMode;
-  $("modeBtn").textContent = S.arMode ? "Radar" : "Caméra (AR)";
+  $("modeBtn").textContent = S.arMode ? "Carte" : "Caméra (AR)";
   video.style.display = S.arMode ? "" : "none";
+  canvas.style.display = S.arMode ? "" : "none";
+  $("map").style.display = S.arMode ? "none" : "block";
   $("fovBox").style.display = S.arMode ? "" : "none";
+  $("rangeBox").style.display = S.arMode ? "none" : "flex";
+  if (!S.arMode) {
+    ensureMap();
+    if (map) {
+      map.invalidateSize();
+      if (!mapFitted && rangeCircle) {
+        map.fitBounds(rangeCircle.getBounds(), { padding: [20, 20] });
+        mapFitted = true;
+      }
+      mapRefresh();
+      updateTrail();
+    }
+  }
 });
 
 function setFov(v) {
@@ -706,10 +813,33 @@ $("fovMinus").addEventListener("click", () => setFov(S.hFov - 2));
 $("fovPlus").addEventListener("click", () => setFov(S.hFov + 2));
 setFov(S.hFov);
 
+/* ---- Slider du rayon de recherche (20–300 km, persisté) ---- */
+(function initRangeSlider() {
+  const sl = $("rangeSlider");
+  sl.value = Math.min(300, Math.max(20, Math.round(rangeKm() / 10) * 10));
+  $("rangeLabel").textContent = sl.value + " km";
+  sl.addEventListener("input", () => {
+    $("rangeLabel").textContent = sl.value + " km";
+  });
+  sl.addEventListener("change", () => {
+    const km = +sl.value;
+    S.radiusNm = Math.max(10, Math.min(250, Math.round(km / 1.852)));
+    localStorage.setItem("radiusNm", S.radiusNm);
+    if (rangeCircle) {
+      rangeCircle.setRadius(rangeKm() * 1000);
+      map.fitBounds(rangeCircle.getBounds(), { padding: [20, 20] });
+    }
+    S.skipUntil = 0;
+    S.failStreak = 0;
+    pollAircraft();       // rafraîchissement immédiat avec le nouveau rayon
+    updateStatus();
+  });
+})();
+
 function updateStatus() {
   const p = [];
   p.push(`${S.aircraft.length} avion${S.aircraft.length > 1 ? "s" : ""}`);
-  p.push(`rayon ${Math.round(RANGE_KM)} km`);
+  p.push(`rayon ${Math.round(rangeKm())} km`);
   if (S.user && S.user.acc) p.push(`GPS ±${Math.round(S.user.acc)} m`);
   if (S.netError) p.push("⚠ aucune source ne répond");
   else if (S.srcIdx > 0) p.push(SOURCES[S.srcIdx].name);

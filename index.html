@@ -117,6 +117,7 @@ const S = {
   aircraft: [],              // liste courante
   routes: new Map(),         // callsign -> "CDG-JFK" | "" (inconnue)
   routesCooldownUntil: 0,
+  routesStatus: "idle",      // idle | ok | fail
   selected: null,            // hex
   hits: [],                  // zones cliquables du dernier rendu
   netError: false,
@@ -219,28 +220,46 @@ async function pollAircraft() {
   refreshDetail();
 }
 
-/* Résolution callsign -> "CDG-JFK" (cache + cache négatif + cooldown si CORS/échec). */
+/* Résolution callsign -> "CDG-JFK". Essaie adsb.lol direct (leur endpoint
+   routeset envoie les en-têtes CORS) puis le worker en secours.
+   S.routesStatus : "idle" | "ok" | "fail" — affiché dans l'UI. */
 async function fetchRoutes(list) {
   if (Date.now() < S.routesCooldownUntil) return;
   const missing = list.filter(a => a.callsign && !S.routes.has(a.callsign)).slice(0, 30);
   if (!missing.length) return;
-  try {
-    const r = await fetch(WORKER_BASE ? WORKER_BASE + "/routeset" : "https://api.adsb.lol/api/0/routeset", {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({planes: missing.map(a => ({callsign:a.callsign, lat:a.lat, lng:a.lon}))}),
-      signal: AbortSignal.timeout(12000),
-    });
-    if (!r.ok) throw new Error();
-    for (const o of await r.json()) {
-      const cs = (o.callsign || "").trim();
-      if (!cs) continue;
-      const iata = (o._airport_codes_iata || "").trim();
-      S.routes.set(cs, (!iata || /unknown/i.test(iata)) ? "" : iata);
-    }
-  } catch(e) {
-    S.routesCooldownUntil = Date.now() + 60000; // on réessaie dans 1 min
+  const body = JSON.stringify({planes: missing.map(a => ({callsign:a.callsign, lat:a.lat, lng:a.lon}))});
+  const targets = ["https://api.adsb.lol/api/0/routeset"];
+  if (WORKER_BASE) targets.push(WORKER_BASE + "/routeset");
+  for (const target of targets) {
+    try {
+      const r = await fetch(target, {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body,
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!r.ok) continue;
+      const arr = await r.json();
+      if (!Array.isArray(arr)) continue;
+      for (const o of arr) {
+        const cs = (o.callsign || "").trim();
+        if (!cs) continue;
+        const iata = (o._airport_codes_iata || "").trim();
+        if (!iata || /unknown/i.test(iata)) { S.routes.set(cs, ""); continue; }
+        // "Ville (CDG) – Ville (JFK)" à partir des détails d'aéroports,
+        // sinon repli sur les codes bruts.
+        const aps = Array.isArray(o._airports) ? o._airports : [];
+        const label = aps.length >= 2
+          ? aps.map(a => `${(a.location || a.name || a.icao || "?").trim()} (${a.iata || a.icao || "?"})`).join(" – ")
+          : iata;
+        S.routes.set(cs, label);
+      }
+      S.routesStatus = "ok";
+      return;
+    } catch(e) {}
   }
+  S.routesStatus = "fail";
+  S.routesCooldownUntil = Date.now() + 60000; // on réessaie dans 1 min
 }
 
 /* ================= Capteurs ================= */
@@ -489,6 +508,7 @@ function updateStatus() {
   if (S.user && S.user.acc) p.push(`GPS ±${Math.round(S.user.acc)} m`);
   if (S.netError) p.push("⚠ aucune source ne répond");
   else if (S.srcIdx > 0) p.push(SOURCES[S.srcIdx].name);
+  if (S.routesStatus === "fail") p.push("routes KO");
   $("status").textContent = p.join(" · ");
 }
 
@@ -500,8 +520,13 @@ function refreshDetail() {
   const now = Date.now();
   el.querySelector(".l1").textContent =
     [ac.callsign || ac.hex.toUpperCase(), ac.type, ac.reg].filter(Boolean).join(" · ");
-  const route = ac.callsign ? S.routes.get(ac.callsign) : null;
-  el.querySelector(".l2").textContent = route || "Route inconnue";
+  const route = ac.callsign ? S.routes.get(ac.callsign) : undefined;
+  el.querySelector(".l2").textContent =
+    !ac.callsign ? "Sans indicatif"
+    : route ? route
+    : route === "" ? "Route inconnue (base de données)"
+    : S.routesStatus === "fail" ? "Routes indisponibles (réseau)"
+    : "Route : recherche…";
   const altFt = Math.round(altitudeAt(ac, now)/0.3048);
   const vs = Math.round(ac.vsFpm);
   const vsT = vs > 100 ? `↑ ${vs} ft/min` : vs < -100 ? `↓ ${-vs} ft/min` : "palier";

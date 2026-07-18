@@ -71,12 +71,6 @@
 <script>
 "use strict";
 
-/* ============================================================
-   ⚙ CONFIGURATION du relais Cloudflare Worker — SANS éditer ce
-   fichier : ouvre une fois la page avec ?worker=URL, ex. :
-   https://tonsite.github.io/skyspotter/?worker=https://skyspotter.x.workers.dev
-   L'URL est mémorisée (localStorage). ?worker= (vide) pour effacer.
-   ============================================================ */
 (() => {
   const qp = new URLSearchParams(location.search).get("worker");
   if (qp !== null) {
@@ -106,6 +100,7 @@ const SOURCES = [
   ...(WORKER_BASE ? [{ name: "worker", url: (la, lo, r) => `${WORKER_BASE}/point/${la}/${lo}/${r}` }] : []),
   { name: "adsb.lol",  url: (la, lo, r) => PT(la, lo, r) },
   { name: "adsb.fi",   url: (la, lo, r) => `https://opendata.adsb.fi/api/v3/lat/${la}/lon/${lo}/dist/${r}` },
+  { name: "airplanes.live", url: (la, lo, r) => `https://api.airplanes.live/v2/point/${la}/${lo}/${r}` },
   { name: "adsb.lol (proxy 1)", url: (la, lo, r) => `https://api.allorigins.win/raw?url=${encodeURIComponent(PT(la, lo, r))}` },
   { name: "adsb.lol (proxy 2)", url: (la, lo, r) => `https://corsproxy.io/?url=${encodeURIComponent(PT(la, lo, r))}` },
 ];
@@ -195,6 +190,51 @@ const AIRLINES = {
   FDX:"FedEx", UPS:"UPS", GEC:"Lufthansa Cargo", CLX:"Cargolux",
   BCS:"DHL (EAT)", GTI:"Atlas Air",
   NJE:"NetJets Europe", VJT:"VistaJet", AIB:"Airbus Industrie",
+};
+
+/* Code type OACI -> nom de modèle (repli quand le flux n'a pas de "desc"). */
+const TYPE_NAMES = {
+  A19N:"Airbus A319neo", A20N:"Airbus A320neo", A21N:"Airbus A321neo",
+  A318:"Airbus A318", A319:"Airbus A319", A320:"Airbus A320", A321:"Airbus A321",
+  A306:"Airbus A300-600", A310:"Airbus A310",
+  A332:"Airbus A330-200", A333:"Airbus A330-300", A338:"Airbus A330-800neo", A339:"Airbus A330-900neo",
+  A342:"Airbus A340-200", A343:"Airbus A340-300", A345:"Airbus A340-500", A346:"Airbus A340-600",
+  A359:"Airbus A350-900", A35K:"Airbus A350-1000", A388:"Airbus A380",
+  A400:"Airbus A400M Atlas", BCS1:"Airbus A220-100", BCS3:"Airbus A220-300",
+  B712:"Boeing 717", B733:"Boeing 737-300", B734:"Boeing 737-400", B735:"Boeing 737-500",
+  B736:"Boeing 737-600", B737:"Boeing 737-700", B738:"Boeing 737-800", B739:"Boeing 737-900",
+  B37M:"Boeing 737 MAX 7", B38M:"Boeing 737 MAX 8", B39M:"Boeing 737 MAX 9",
+  B744:"Boeing 747-400", B748:"Boeing 747-8", B752:"Boeing 757-200", B753:"Boeing 757-300",
+  B762:"Boeing 767-200", B763:"Boeing 767-300", B764:"Boeing 767-400",
+  B772:"Boeing 777-200", B77L:"Boeing 777-200LR", B773:"Boeing 777-300", B77W:"Boeing 777-300ER",
+  B788:"Boeing 787-8", B789:"Boeing 787-9", B78X:"Boeing 787-10",
+  E135:"Embraer ERJ-135", E145:"Embraer ERJ-145", E170:"Embraer E170", E175:"Embraer E175",
+  E190:"Embraer E190", E195:"Embraer E195", E290:"Embraer E190-E2", E295:"Embraer E195-E2",
+  E50P:"Embraer Phenom 100", E55P:"Embraer Phenom 300", E545:"Embraer Legacy 450", E550:"Embraer Legacy 500",
+  CRJ2:"Bombardier CRJ200", CRJ7:"Bombardier CRJ700", CRJ9:"Bombardier CRJ900", CRJX:"Bombardier CRJ1000",
+  DH8A:"Dash 8-100", DH8C:"Dash 8-300", DH8D:"Dash 8 Q400",
+  AT43:"ATR 42-300", AT45:"ATR 42-500", AT46:"ATR 42-600",
+  AT72:"ATR 72-200", AT75:"ATR 72-500", AT76:"ATR 72-600",
+  C25A:"Citation CJ2", C25B:"Citation CJ3", C25C:"Citation CJ4", C25M:"Citation M2",
+  C510:"Citation Mustang", C525:"CitationJet", C550:"Citation II", C560:"Citation V",
+  C56X:"Citation Excel", C680:"Citation Sovereign", C68A:"Citation Latitude", C700:"Citation Longitude",
+  CL30:"Challenger 300", CL35:"Challenger 350", CL60:"Challenger 600",
+  GL5T:"Global 5000", GL7T:"Global 7500", GLEX:"Global Express",
+  GLF4:"Gulfstream IV", GLF5:"Gulfstream V", GLF6:"Gulfstream G650", G280:"Gulfstream G280",
+  F900:"Falcon 900", F2TH:"Falcon 2000", FA50:"Falcon 50", FA7X:"Falcon 7X", FA8X:"Falcon 8X",
+  LJ45:"Learjet 45", LJ60:"Learjet 60", LJ75:"Learjet 75",
+  PC12:"Pilatus PC-12", PC24:"Pilatus PC-24", TBM9:"TBM 900", HDJT:"HondaJet", SF50:"Cirrus Vision Jet",
+  BE20:"King Air 200", B350:"King Air 350", BE9L:"King Air 90", BE58:"Beechcraft Baron", BE36:"Beechcraft Bonanza",
+  C152:"Cessna 152", C172:"Cessna 172", C182:"Cessna 182", C206:"Cessna 206", C208:"Cessna 208 Caravan",
+  P28A:"Piper PA-28", PA34:"Piper Seneca", PA46:"Piper PA-46", M20P:"Mooney M20",
+  SR20:"Cirrus SR20", SR22:"Cirrus SR22", DA40:"Diamond DA40", DA42:"Diamond DA42", DA62:"Diamond DA62",
+  DR40:"Robin DR400", ULAC:"ULM", GLID:"Planeur",
+  AS50:"Écureuil AS350", AS55:"Écureuil AS355", AS65:"Dauphin AS365",
+  EC35:"Airbus H135", EC45:"Airbus H145", EC75:"Airbus H175", H160:"Airbus H160",
+  A109:"Leonardo AW109", A139:"Leonardo AW139", A169:"Leonardo AW169", A189:"Leonardo AW189",
+  B06:"Bell 206", B407:"Bell 407", B412:"Bell 412", B429:"Bell 429",
+  R22:"Robinson R22", R44:"Robinson R44", R66:"Robinson R66", S76:"Sikorsky S-76", S92:"Sikorsky S-92",
+  C130:"Lockheed C-130 Hercules", EUFI:"Eurofighter Typhoon", RFAL:"Dassault Rafale",
 };
 
 /* Catégorie ADS-B (champ "category") -> libellé. */
@@ -324,6 +364,26 @@ function storeRoute(callsign, o) {
   S.routes.set(callsign, label);
 }
 
+/* Envoie un lot d'indicatifs à une cible compatible routeset et stocke
+   les résultats. Retourne true si la réponse est exploitable. */
+async function routesetBatch(url, missing) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({planes: missing.map(a =>
+      ({callsign: a.callsign, lat: a.lat, lng: a.lon}))}),
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!r.ok) return false;
+  const arr = await r.json();
+  if (!Array.isArray(arr) || !arr.length) return false;
+  for (const o of arr) {
+    const cs = ((o && o.callsign) || "").trim();
+    if (cs) storeRoute(cs, o);
+  }
+  return true;
+}
+
 async function fetchRoutes(list) {
   if (S.routesBusy) return;
   const now = Date.now();
@@ -336,35 +396,26 @@ async function fetchRoutes(list) {
   try {
     let ok = false;
 
-    // 1) Résolution groupée via le worker : tous les indicatifs manquants
-    //    en UNE requête (le worker interroge routeset côté serveur).
-    if (WORKER_BASE) {
-      try {
-        const r = await fetch(WORKER_BASE + "/routes", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({planes: missing.map(a =>
-            ({callsign: a.callsign, lat: a.lat, lng: a.lon}))}),
-          signal: AbortSignal.timeout(15000),
-        });
-        if (r.ok) {
-          const arr = await r.json();
-          if (Array.isArray(arr)) {
-            for (const o of arr) {
-              const cs = ((o && o.callsign) || "").trim();
-              if (cs) storeRoute(cs, o);
-            }
-            ok = true;
-          }
-        }
-      } catch(e) {}
+    // 1) Lots groupés, cibles par ordre de préférence.
+    const RS = "https://api.adsb.lol/api/0/routeset";
+    const batchTargets = [];
+    if (WORKER_BASE) batchTargets.push(WORKER_BASE + "/routes");
+    batchTargets.push(RS);
+    batchTargets.push("https://corsproxy.io/?url=" + encodeURIComponent(RS));
+    for (const t of batchTargets) {
+      try { if (await routesetBatch(t, missing)) { ok = true; break; } }
+      catch(e) {}
     }
 
-    // 2) Repli sans worker : GET unitaires, direct puis via proxy CORS.
+    // 2) Dernier recours : GET unitaires (direct, allorigins, corsproxy).
     if (!ok) {
       for (const a of missing.slice(0, 3)) {
         const direct = `https://api.adsb.lol/api/0/route/${encodeURIComponent(a.callsign)}/${a.lat.toFixed(3)}/${a.lon.toFixed(3)}`;
-        const urls = [direct, `https://api.allorigins.win/raw?url=${encodeURIComponent(direct)}`];
+        const urls = [
+          direct,
+          `https://api.allorigins.win/raw?url=${encodeURIComponent(direct)}`,
+          `https://corsproxy.io/?url=${encodeURIComponent(direct)}`,
+        ];
         for (const u of urls) {
           try {
             const r = await fetch(u, {signal: AbortSignal.timeout(10000)});
@@ -660,7 +711,7 @@ function refreshDetail() {
     : "Route : recherche…";
 
   el.querySelector(".l2b").textContent = [
-    prettyModel(ac.desc),
+    prettyModel(ac.desc) || TYPE_NAMES[ac.type] || "",
     catLabel(ac.category),
     operatorLabel(ac),
   ].filter(Boolean).join(" · ");

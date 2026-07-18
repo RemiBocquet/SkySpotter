@@ -25,6 +25,7 @@
   }
   #detail .l1 { font-size:17px; font-weight:700; }
   #detail .l2 { font-size:14px; color:#80d8ff; margin-top:2px; }
+  #detail .l2b { font-size:13px; color:rgba(255,255,255,.62); margin-top:3px; }
   #detail .l3 { font-size:13px; color:rgba(255,255,255,.8); margin-top:4px; }
   .btn {
     position:fixed; z-index:6; border:none; border-radius:22px; padding:12px 18px;
@@ -53,7 +54,7 @@
 <video id="video" autoplay muted playsinline></video>
 <canvas id="overlay"></canvas>
 <div id="status">Démarrage…</div>
-<div id="detail"><div class="l1"></div><div class="l2"></div><div class="l3"></div></div>
+<div id="detail"><div class="l1"></div><div class="l2"></div><div class="l2b"></div><div class="l3"></div></div>
 <button id="modeBtn" class="btn">Radar</button>
 <div id="fovBox"><button id="fovMinus">−</button><span id="fovLabel">FOV 55°</span><button id="fovPlus">+</button></div>
 
@@ -168,6 +169,71 @@ function altitudeAt(ac, now) {
   return ac.altM + ac.vsFpm*0.00508*dt;
 }
 
+/* ================= Compagnies, catégories, opérateurs ================= */
+const AIRLINES = {
+  AFR:"Air France", HOP:"Air France Hop", TVF:"Transavia France", TRA:"Transavia",
+  EZY:"easyJet", EJU:"easyJet Europe", EZS:"easyJet Switzerland",
+  RYR:"Ryanair", RUK:"Ryanair UK", WZZ:"Wizz Air", VLG:"Vueling", VOE:"Volotea",
+  IBE:"Iberia", IBS:"Iberia Express", ANE:"Air Nostrum",
+  BAW:"British Airways", CFE:"BA CityFlyer", SHT:"BA Shuttle", VIR:"Virgin Atlantic",
+  EIN:"Aer Lingus", EXS:"Jet2", TOM:"TUI Airways", JAF:"TUI fly Belgium", TFL:"TUI fly Netherlands",
+  DLH:"Lufthansa", CLH:"Lufthansa CityLine", EWG:"Eurowings", CFG:"Condor",
+  AUA:"Austrian", SWR:"Swiss", EDW:"Edelweiss", BEL:"Brussels Airlines",
+  KLM:"KLM", TAP:"TAP Air Portugal", AEE:"Aegean", ITY:"ITA Airways",
+  SAS:"SAS", NAX:"Norwegian", FIN:"Finnair", LOT:"LOT", TVS:"Smartwings", ICE:"Icelandair",
+  DAH:"Air Algérie", TAR:"Tunisair", RAM:"Royal Air Maroc", MSR:"EgyptAir", ELY:"El Al",
+  THY:"Turkish Airlines", PGT:"Pegasus", SXS:"SunExpress",
+  UAE:"Emirates", QTR:"Qatar Airways", ETD:"Etihad", SVA:"Saudia",
+  DAL:"Delta Air Lines", UAL:"United Airlines", AAL:"American Airlines",
+  ACA:"Air Canada", JBU:"JetBlue", SWA:"Southwest", WJA:"WestJet",
+  KAL:"Korean Air", AAR:"Asiana", JAL:"Japan Airlines", ANA:"All Nippon Airways",
+  SIA:"Singapore Airlines", CPA:"Cathay Pacific", CCA:"Air China",
+  CES:"China Eastern", CSN:"China Southern", ETH:"Ethiopian Airlines",
+  QFA:"Qantas", ANZ:"Air New Zealand",
+  FWI:"Air Caraïbes", CRL:"Corsair", FBU:"French Bee",
+  FDX:"FedEx", UPS:"UPS", GEC:"Lufthansa Cargo", CLX:"Cargolux",
+  BCS:"DHL (EAT)", GTI:"Atlas Air",
+  NJE:"NetJets Europe", VJT:"VistaJet", AIB:"Airbus Industrie",
+};
+
+/* Catégorie ADS-B (champ "category") -> libellé. */
+function catLabel(c) {
+  switch (c) {
+    case "A7": return "Hélicoptère";
+    case "B1": return "Planeur";
+    case "B2": return "Ballon";
+    case "B4": return "ULM / paramoteur";
+    case "B6": return "Drone";
+    case "A1": return "Avion léger";
+    case "A2": return "Avion";
+    case "A3": case "A4": return "Avion de ligne";
+    case "A5": return "Gros porteur";
+    case "A6": return "Avion (hautes perf.)";
+    default: return c && c[0] === "A" ? "Avion" : "";
+  }
+}
+
+/* Opérateur : compagnie identifiée, sinon opérateur enregistré, sinon
+   "Vol privé" quand l'indicatif radio est l'immatriculation elle-même. */
+function operatorLabel(ac) {
+  const cs = (ac.callsign || "").toUpperCase();
+  const reg = (ac.reg || "").replace(/-/g, "").toUpperCase();
+  const isPrivate = cs && reg && cs.replace(/-/g, "") === reg;
+  const m = cs.match(/^([A-Z]{3})\d/);
+  const airline = m ? AIRLINES[m[1]] : null;
+  if (isPrivate) return ac.ownOp ? `Vol privé · ${ac.ownOp}` : "Vol privé";
+  if (airline) return airline;
+  if (ac.ownOp) return ac.ownOp;
+  if (m) return `Opérateur ${m[1]}`;
+  return "";
+}
+
+/* "AIRBUS A-320 NEO" -> "Airbus A-320 Neo" (plus lisible). */
+function prettyModel(desc) {
+  if (!desc) return "";
+  return desc.toLowerCase().replace(/(^|[\s\-/(])([a-z])/g, (s, a, b) => a + b.toUpperCase());
+}
+
 /* ================= Réseau (adsb.lol, failover adsb.one) ================= */
 async function fetchPoint(lat, lon, radiusNm) {
   const la = lat.toFixed(4), lo = lon.toFixed(4);
@@ -207,6 +273,9 @@ async function pollAircraft() {
         callsign: (o.flight || "").trim() || null,
         type: (o.t || "").trim() || null,
         reg: (o.r || "").trim() || null,
+        desc: (o.desc || "").trim() || null,        // "AIRBUS A-320" etc.
+        category: (o.category || "").trim() || null, // A1..A7, B1..B7
+        ownOp: (o.ownOp || "").trim() || null,       // opérateur enregistré
         lat: o.lat, lon: o.lon,
         altM: altFt*0.3048,
         gsKt: typeof o.gs === "number" ? o.gs : 0,
@@ -249,34 +318,57 @@ async function fetchRoutes(list) {
   const missing = list.filter(a =>
     a.callsign && !S.routes.has(a.callsign) &&
     (S.routeRetryAt.get(a.callsign) || 0) <= now
-  ).slice(0, 3);
+  ).slice(0, 50);
   if (!missing.length) return;
   S.routesBusy = true;
   try {
-    let anyOk = false, anyFail = false;
-    for (const a of missing) {
-      const path = `/route/${encodeURIComponent(a.callsign)}/${a.lat.toFixed(3)}/${a.lon.toFixed(3)}`;
-      // Worker en premier : il met les routes en cache côté Cloudflare,
-      // donc chaque indicatif ne coûte qu'une seule requête à adsb.lol.
-      const targets = [];
-      if (WORKER_BASE) targets.push(WORKER_BASE + path);
-      targets.push("https://api.adsb.lol/api/0" + path);
-      let done = false;
-      for (const u of targets) {
-        try {
-          const r = await fetch(u, {signal: AbortSignal.timeout(10000)});
-          if (!r.ok) continue;
-          storeRoute(a.callsign, await r.json());
-          done = true;
-          break;
-        } catch(e) {}
-      }
-      if (done) anyOk = true;
-      else { anyFail = true; S.routeRetryAt.set(a.callsign, Date.now() + 45000); }
-      await new Promise(res => setTimeout(res, 400)); // espacement anti rate-limit
+    let ok = false;
+
+    // 1) Résolution groupée via le worker : tous les indicatifs manquants
+    //    en UNE requête (le worker interroge routeset côté serveur).
+    if (WORKER_BASE) {
+      try {
+        const r = await fetch(WORKER_BASE + "/routes", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({planes: missing.map(a =>
+            ({callsign: a.callsign, lat: a.lat, lng: a.lon}))}),
+          signal: AbortSignal.timeout(15000),
+        });
+        if (r.ok) {
+          const arr = await r.json();
+          if (Array.isArray(arr)) {
+            for (const o of arr) {
+              const cs = ((o && o.callsign) || "").trim();
+              if (cs) storeRoute(cs, o);
+            }
+            ok = true;
+          }
+        }
+      } catch(e) {}
     }
-    if (anyOk) S.routesStatus = "ok";
-    else if (anyFail) S.routesStatus = "fail";
+
+    // 2) Repli sans worker : GET unitaires directs, espacés.
+    if (!ok) {
+      for (const a of missing.slice(0, 3)) {
+        try {
+          const u = `https://api.adsb.lol/api/0/route/${encodeURIComponent(a.callsign)}/${a.lat.toFixed(3)}/${a.lon.toFixed(3)}`;
+          const r = await fetch(u, {signal: AbortSignal.timeout(10000)});
+          if (r.ok) { storeRoute(a.callsign, await r.json()); ok = true; }
+        } catch(e) {}
+        await new Promise(res => setTimeout(res, 400));
+      }
+    }
+
+    if (ok) {
+      S.routesStatus = "ok";
+    } else {
+      S.routesStatus = "fail";
+    }
+    // Les indicatifs toujours manquants seront retentés dans 20 s.
+    for (const a of missing) {
+      if (!S.routes.has(a.callsign)) S.routeRetryAt.set(a.callsign, Date.now() + 20000);
+    }
     refreshDetail();
   } finally {
     S.routesBusy = false;
@@ -405,10 +497,10 @@ function drawMarker(ac, x, y, gd, now) {
   ctx.moveTo(x, y-r); ctx.lineTo(x+r, y); ctx.lineTo(x, y+r); ctx.lineTo(x-r, y);
   ctx.closePath(); ctx.stroke();
 
-  const altFt = Math.round(altitudeAt(ac, now)/0.3048/100)*100;
+  const altM = Math.round(altitudeAt(ac, now)/50)*50;
   const dKm = gd/1000;
   const l1 = ac.callsign || ac.hex.toUpperCase();
-  const l2 = `${ac.type || "?"} · ${altFt} ft · ${dKm >= 10 ? Math.round(dKm) : dKm.toFixed(1)} km`;
+  const l2 = `${ac.type || "?"} · ${altM} m · ${dKm >= 10 ? Math.round(dKm) : dKm.toFixed(1)} km`;
 
   ctx.font = "bold 15px system-ui"; const w1 = ctx.measureText(l1).width;
   ctx.font = "12px system-ui";      const w2 = ctx.measureText(l2).width;
@@ -545,12 +637,23 @@ function refreshDetail() {
   el.querySelector(".l2").textContent =
     !ac.callsign ? "Sans indicatif"
     : route ? route
-    : route === "" ? "Route inconnue (base de données)"
+    : route === "" ? "Route non publiée"
     : S.routesStatus === "fail" ? "Route : recherche… (réseau lent)"
     : "Route : recherche…";
-  const altFt = Math.round(altitudeAt(ac, now)/0.3048);
-  const vs = Math.round(ac.vsFpm);
-  const vsT = vs > 100 ? `↑ ${vs} ft/min` : vs < -100 ? `↓ ${-vs} ft/min` : "palier";
+
+  el.querySelector(".l2b").textContent = [
+    prettyModel(ac.desc),
+    catLabel(ac.category),
+    operatorLabel(ac),
+  ].filter(Boolean).join(" · ");
+
+  const altM = Math.round(altitudeAt(ac, now));
+  const fl = Math.round(altM / 0.3048 / 100);
+  const kmh = Math.round(ac.gsKt * 1.852);
+  const vsMs = ac.vsFpm * 0.00508;
+  const vsT = vsMs > 0.5 ? `↑ ${vsMs.toFixed(1)} m/s`
+            : vsMs < -0.5 ? `↓ ${(-vsMs).toFixed(1)} m/s`
+            : "palier";
   let dT = "";
   if (S.user) {
     const [plat, plon] = positionAt(ac, now);
@@ -559,7 +662,7 @@ function refreshDetail() {
     dT = ` · ${d >= 10 ? Math.round(d) : d.toFixed(1)} km, cap ${b}°`;
   }
   el.querySelector(".l3").textContent =
-    `${altFt} ft (${Math.round(altFt*0.3048)} m) · ${Math.round(ac.gsKt)} kt · ${vsT}${dT}`;
+    `${altM} m (FL${fl}) · ${kmh} km/h · ${vsT}${dT}`;
 }
 
 /* ================= Démarrage ================= */

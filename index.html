@@ -8,13 +8,13 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>SkySpotter</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html, body { height:100%; overflow:hidden; background:#0a0f14; font-family:system-ui,-apple-system,sans-serif; color:#fff; }
-  #video { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; }
-  #overlay { position:fixed; inset:0; width:100%; height:100%; touch-action:none; }
+  #video { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; z-index:1; }
+  #overlay { position:fixed; inset:0; width:100%; height:100%; touch-action:none; z-index:2; }
   #status {
     position:fixed; top:calc(env(safe-area-inset-top,0px) + 10px); left:50%; transform:translateX(-50%);
     background:rgba(16,24,32,.85); border:1px solid rgba(79,195,247,.25); border-radius:14px;
@@ -34,7 +34,14 @@
     background:rgba(79,195,247,.9); color:#00141f; font-size:15px; font-weight:700;
   }
   #modeBtn { right:16px; bottom:calc(env(safe-area-inset-bottom,0px) + 16px); }
-  #map { position:fixed; inset:0; display:none; background:#0a0f14; z-index:1; }
+  #map { position:fixed; inset:0; visibility:hidden; background:#0a0f14; z-index:0; }
+  #mapLoading {
+    position:fixed; left:50%; top:50%; transform:translate(-50%,-50%); z-index:4;
+    background:rgba(16,24,32,.92); border:1px solid rgba(79,195,247,.25); border-radius:14px;
+    padding:16px 20px; text-align:center; font-size:16px; color:#fff; display:none;
+    max-width:320px; line-height:1.4;
+  }
+  #mapLoading small { font-size:12px; color:rgba(255,255,255,.6); }
   .pwrap { background:none !important; border:none !important; }
   .pmark { width:22px; height:22px; margin:0 auto; font-size:19px; line-height:22px;
     text-align:center; text-shadow:0 0 3px rgba(0,0,0,.9); }
@@ -70,6 +77,9 @@
 <div id="status">Démarrage…</div>
 <div id="detail"><div class="l1"></div><div class="l2"></div><div class="l2b"></div><div class="l3"></div></div>
 <div id="map"></div>
+<div id="mapLoading">Chargement de la carte…<br>
+<small>Au premier lancement, le fond de carte doit être téléchargé —
+quelques secondes selon la connexion.</small></div>
 <button id="modeBtn" class="btn">Carte</button>
 <div id="fovBox"><button id="fovMinus">−</button><span id="fovLabel">FOV 55°</span><button id="fovPlus">+</button></div>
 <div id="rangeBox"><span>Rayon</span><input id="rangeSlider" type="range" min="20" max="300" step="10"><span id="rangeLabel"></span></div>
@@ -574,6 +584,7 @@ function draw() {
 function drawAR(w, h) {
   if (!S.user) { centerText(w, h, "En attente du GPS…"); return; }
   if (!S.cam.has) { centerText(w, h, "En attente des capteurs… (bougez le téléphone)"); return; }
+  if (!S.lastFetch) { centerText(w, h, "Recherche des avions autour de vous…"); return; }
   const now = Date.now();
   const vF = vFovDeg();
   const rollRad = -S.cam.roll*D2R, cR = Math.cos(rollRad), sR = Math.sin(rollRad);
@@ -647,19 +658,27 @@ function altColor(altM) {
   return altM < 3000 ? "#FFB74D" : altM < 8000 ? "#4FC3F7" : "#B39DDB";
 }
 
+let tilesReady = false;
+
 function ensureMap() {
   if (map || typeof L === "undefined" || !S.user) return;
+  if (!S.arMode) $("mapLoading").style.display = "block";
   map = L.map("map", { zoomControl: false });
-  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+  const tiles = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
     maxZoom: 19, subdomains: "abcd",
     attribution: "&copy; OpenStreetMap &copy; CARTO",
   }).addTo(map);
+  const hideLoading = () => { tilesReady = true; $("mapLoading").style.display = "none"; };
+  tiles.on("load", hideLoading);      // premières tuiles affichées
+  setTimeout(hideLoading, 15000);     // garde-fou si l'événement ne vient pas
   userMarker = L.circleMarker([S.user.lat, S.user.lon],
     { radius: 7, color: "#48FFB0", fillColor: "#48FFB0", fillOpacity: 1, weight: 2 }).addTo(map);
   rangeCircle = L.circle([S.user.lat, S.user.lon],
     { radius: rangeKm() * 1000, color: "#48FFB0", weight: 1, opacity: .35, fillOpacity: .03,
       interactive: false }).addTo(map);
   map.on("click", () => selectHex(null));
+  map.fitBounds(rangeCircle.getBounds(), { padding: [20, 20] });
+  mapFitted = true;
 }
 
 function planeIcon(ac, color) {
@@ -787,22 +806,27 @@ $("modeBtn").addEventListener("click", () => {
   $("modeBtn").textContent = S.arMode ? "Carte" : "Caméra (AR)";
   video.style.display = S.arMode ? "" : "none";
   canvas.style.display = S.arMode ? "" : "none";
-  $("map").style.display = S.arMode ? "none" : "block";
+  $("map").style.visibility = S.arMode ? "hidden" : "visible";
   $("fovBox").style.display = S.arMode ? "" : "none";
   $("rangeBox").style.display = S.arMode ? "none" : "flex";
-  if (!S.arMode) {
+  if (S.arMode) {
+    $("mapLoading").style.display = "none";
+  } else {
     ensureMap();
     if (map) {
       map.invalidateSize();
-      if (!mapFitted && rangeCircle) {
-        map.fitBounds(rangeCircle.getBounds(), { padding: [20, 20] });
-        mapFitted = true;
-      }
+      if (!tilesReady) $("mapLoading").style.display = "block";
       mapRefresh();
       updateTrail();
     }
   }
 });
+
+// Préchargement : la carte est créée en arrière-plan dès que le GPS est
+// disponible, pendant que l'utilisateur est encore en mode AR.
+setInterval(() => {
+  if (!map && S.user && typeof L !== "undefined") ensureMap();
+}, 2000);
 
 function setFov(v) {
   S.hFov = Math.max(30, Math.min(85, v));
@@ -838,7 +862,11 @@ setFov(S.hFov);
 
 function updateStatus() {
   const p = [];
-  p.push(`${S.aircraft.length} avion${S.aircraft.length > 1 ? "s" : ""}`);
+  if (!S.lastFetch) {
+    p.push(S.user ? "requêtes en cours…" : "en attente du GPS…");
+  } else {
+    p.push(`${S.aircraft.length} avion${S.aircraft.length > 1 ? "s" : ""}`);
+  }
   p.push(`rayon ${Math.round(rangeKm())} km`);
   if (S.user && S.user.acc) p.push(`GPS ±${Math.round(S.user.acc)} m`);
   if (S.netError) p.push("⚠ aucune source ne répond");
@@ -904,6 +932,7 @@ $("startBtn").addEventListener("click", async () => {
     try { await screen.orientation.lock("portrait"); } catch(e) {}
     try { await navigator.wakeLock.request("screen"); } catch(e) {}
     setInterval(pollAircraft, POLL_MS);
+    updateStatus();
     pollAircraft();
     requestAnimationFrame(draw);
   } catch(e) {

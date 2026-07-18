@@ -69,6 +69,13 @@
 <script>
 "use strict";
 
+/* ============================================================
+   ⚙ CONFIGURATION : colle ici l'URL de ton Cloudflare Worker
+   (ex: "https://skyspotter.tonpseudo.workers.dev") — sans / final.
+   Laisser vide pour utiliser les sources publiques (CORS aléatoire).
+   ============================================================ */
+const WORKER_BASE = "https://skyspotter.bocquet-remi98.workers.dev";
+
 /* ================= Constantes & état ================= */
 const EARTH_R = 6371000;
 const RADIUS_NM = 40;                       // rayon de recherche (≈ 74 km)
@@ -79,6 +86,7 @@ const POLL_MS = 5000;
    d'où les solutions de repli : adsb.fi (v3) puis proxys CORS publics. */
 const PT = (la, lo, r) => `https://api.adsb.lol/v2/point/${la}/${lo}/${r}`;
 const SOURCES = [
+  ...(WORKER_BASE ? [{ name: "worker", url: (la, lo, r) => `${WORKER_BASE}/point/${la}/${lo}/${r}` }] : []),
   { name: "adsb.lol",  url: (la, lo, r) => PT(la, lo, r) },
   { name: "adsb.fi",   url: (la, lo, r) => `https://opendata.adsb.fi/api/v3/lat/${la}/lon/${lo}/dist/${r}` },
   { name: "adsb.lol (proxy 1)", url: (la, lo, r) => `https://api.allorigins.win/raw?url=${encodeURIComponent(PT(la, lo, r))}` },
@@ -201,7 +209,7 @@ async function fetchRoutes(list) {
   const missing = list.filter(a => a.callsign && !S.routes.has(a.callsign)).slice(0, 30);
   if (!missing.length) return;
   try {
-    const r = await fetch("https://api.adsb.lol/api/0/routeset", {
+    const r = await fetch(WORKER_BASE ? WORKER_BASE + "/routeset" : "https://api.adsb.lol/api/0/routeset", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body: JSON.stringify({planes: missing.map(a => ({callsign:a.callsign, lat:a.lat, lng:a.lon}))}),
@@ -460,58 +468,4 @@ setFov(S.hFov);
 
 function updateStatus() {
   const p = [];
-  p.push(`${S.aircraft.length} avion${S.aircraft.length > 1 ? "s" : ""}`);
-  p.push(`rayon ${Math.round(RANGE_KM)} km`);
-  if (S.user && S.user.acc) p.push(`GPS ±${Math.round(S.user.acc)} m`);
-  if (S.netError) p.push("⚠ aucune source ne répond");
-  else if (S.srcIdx > 0) p.push(SOURCES[S.srcIdx].name);
-  $("status").textContent = p.join(" · ");
-}
-
-function refreshDetail() {
-  const ac = S.selected ? S.aircraft.find(a => a.hex === S.selected) : null;
-  const el = $("detail");
-  if (!ac) { el.style.display = "none"; return; }
-  el.style.display = "block";
-  const now = Date.now();
-  el.querySelector(".l1").textContent =
-    [ac.callsign || ac.hex.toUpperCase(), ac.type, ac.reg].filter(Boolean).join(" · ");
-  const route = ac.callsign ? S.routes.get(ac.callsign) : null;
-  el.querySelector(".l2").textContent = route || "Route inconnue";
-  const altFt = Math.round(altitudeAt(ac, now)/0.3048);
-  const vs = Math.round(ac.vsFpm);
-  const vsT = vs > 100 ? `↑ ${vs} ft/min` : vs < -100 ? `↓ ${-vs} ft/min` : "palier";
-  let dT = "";
-  if (S.user) {
-    const [plat, plon] = positionAt(ac, now);
-    const d = haversineM(S.user.lat, S.user.lon, plat, plon)/1000;
-    const b = Math.round(bearingDeg(S.user.lat, S.user.lon, plat, plon));
-    dT = ` · ${d >= 10 ? Math.round(d) : d.toFixed(1)} km, cap ${b}°`;
-  }
-  el.querySelector(".l3").textContent =
-    `${altFt} ft (${Math.round(altFt*0.3048)} m) · ${Math.round(ac.gsKt)} kt · ${vsT}${dT}`;
-}
-
-/* ================= Démarrage ================= */
-$("startBtn").addEventListener("click", async () => {
-  const err = $("err");
-  err.textContent = "";
-  try {
-    await startOrientation();       // d'abord (geste utilisateur requis sur iOS)
-    await startCamera();
-    startLocation();
-    $("startScreen").style.display = "none";
-    resize();
-    try { await screen.orientation.lock("portrait"); } catch(e) {}
-    try { await navigator.wakeLock.request("screen"); } catch(e) {}
-    setInterval(pollAircraft, POLL_MS);
-    pollAircraft();
-    requestAnimationFrame(draw);
-  } catch(e) {
-    err.textContent = "Erreur : " + e.message +
-      " — vérifiez que la page est servie en HTTPS et que les permissions caméra/position sont accordées.";
-  }
-});
-</script>
-</body>
-</html>
+  p.push(`${S.aircraft.length} avion${S.air

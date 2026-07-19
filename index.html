@@ -7,6 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SkySpotter">
 <title>SkySpotter</title>
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-180.png">
@@ -27,7 +28,14 @@
     position:fixed; left:12px; right:12px; bottom:calc(env(safe-area-inset-bottom,0px) + 86px);
     background:rgba(16,24,32,.88); border:1px solid rgba(79,195,247,.25); border-radius:14px;
     padding:12px 14px; display:none; z-index:5;
+    align-items:flex-start; gap:12px;
   }
+  #detail .dtext { flex:1; min-width:0; }
+  #photoBox { flex:0 0 auto; width:112px; }
+  #detailPhoto { width:112px; height:74px; object-fit:cover; border-radius:8px; display:block;
+    background:#0a0f14; }
+  #photoCredit { font-size:9px; color:rgba(255,255,255,.5); text-align:center; margin-top:2px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #detail .l1 { font-size:17px; font-weight:700; }
   #detail .l2 { font-size:14px; color:#80d8ff; margin-top:2px; }
   #detail .l2b { font-size:13px; color:rgba(255,255,255,.62); margin-top:3px; }
@@ -78,7 +86,15 @@
 <video id="video" autoplay muted playsinline></video>
 <canvas id="overlay"></canvas>
 <div id="status">Démarrage…</div>
-<div id="detail"><div class="l1"></div><div class="l2"></div><div class="l2b"></div><div class="l3"></div></div>
+<div id="detail">
+  <div class="dtext">
+    <div class="l1"></div><div class="l2"></div><div class="l2b"></div><div class="l3"></div>
+  </div>
+  <div id="photoBox" style="display:none">
+    <img id="detailPhoto" alt="Photo de l'appareil">
+    <div id="photoCredit"></div>
+  </div>
+</div>
 <div id="map"></div>
 <div id="mapLoading">Chargement de la carte…<br>
 <small>Au premier lancement, le fond de carte doit être téléchargé —
@@ -889,11 +905,53 @@ function updateStatus() {
   $("status").textContent = p.join(" · ");
 }
 
+/* ================= Photo de l'appareil (planespotters.net) =================
+   API publique, photo par code hex ICAO, crédit photographe obligatoire.
+   Cache : "pending" | null (pas de photo) | {src, link, credit}. */
+const photoCache = new Map();
+
+function updatePhoto(hex) {
+  const box = $("photoBox"), img = $("detailPhoto"), credit = $("photoCredit");
+  const ph = photoCache.get(hex);
+  if (ph && ph.src) {
+    if (img.src !== ph.src) img.src = ph.src;
+    credit.textContent = ph.credit ? "© " + ph.credit : "";
+    box.style.display = "block";
+    box.onclick = ph.link ? () => window.open(ph.link, "_blank") : null;
+    return;
+  }
+  box.style.display = "none";
+  if (ph === undefined) fetchPhoto(hex); // jamais tentée pour ce hex
+}
+
+async function fetchPhoto(hex) {
+  photoCache.set(hex, "pending");
+  try {
+    const r = await fetch("https://api.planespotters.net/pub/photos/hex/" + encodeURIComponent(hex),
+      {signal: AbortSignal.timeout(10000)});
+    if (r.ok) {
+      const j = await r.json();
+      const p = j && Array.isArray(j.photos) && j.photos[0];
+      const src = p && ((p.thumbnail_large && p.thumbnail_large.src) ||
+                        (p.thumbnail && p.thumbnail.src));
+      photoCache.set(hex, src
+        ? { src, link: p.link || "", credit: p.photographer || "" }
+        : null);
+    } else {
+      photoCache.set(hex, null);
+    }
+  } catch (e) {
+    photoCache.delete(hex); // erreur réseau : on pourra retenter plus tard
+  }
+  if (S.selected === hex) refreshDetail();
+}
+
 function refreshDetail() {
   const ac = S.selected ? S.aircraft.find(a => a.hex === S.selected) : null;
   const el = $("detail");
   if (!ac) { el.style.display = "none"; return; }
-  el.style.display = "block";
+  el.style.display = "flex";
+  updatePhoto(ac.hex);
   const now = Date.now();
   el.querySelector(".l1").textContent =
     [ac.callsign || ac.hex.toUpperCase(), ac.type, ac.reg].filter(Boolean).join(" · ");

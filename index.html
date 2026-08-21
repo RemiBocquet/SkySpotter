@@ -117,20 +117,18 @@ quelques secondes selon la connexion.</small></div>
 "use strict";
 
 /* ============================================================
-   ⚙ CONFIGURATION du relais Cloudflare Worker — SANS éditer ce
-   fichier : ouvre une fois la page avec ?worker=URL, ex. :
-   https://tonsite.github.io/skyspotter/?worker=https://skyspotter.x.workers.dev
-   L'URL est mémorisée (localStorage). ?worker= (vide) pour effacer.
+   RELAIS DE DONNÉES — plus aucune configuration par URL.
+
+   L'ancien paramètre ?worker= était mémorisé en localStorage sans
+   validation ni confirmation : un simple lien piégé suffisait à
+   détourner DURABLEMENT tout le trafic de l'application — dont la
+   position de l'utilisateur — vers un serveur choisi par un tiers,
+   sans que rien ne le laisse voir.
+
+   Les requêtes passent désormais par ce serveur, sur la même
+   origine. Voir /etc/nginx/snippets/relay-adsb.conf.
    ============================================================ */
-(() => {
-  const qp = new URLSearchParams(location.search).get("worker");
-  if (qp !== null) {
-    if (qp.trim()) localStorage.setItem("workerBase", qp.trim());
-    else localStorage.removeItem("workerBase");
-  }
-})();
-const WORKER_BASE = (localStorage.getItem("workerBase")
-  || "https://skyspotter.bocquet-remi98.workers.dev").replace(/\/+$/, "");
+try { localStorage.removeItem("workerBase"); } catch (e) {}
 
 /* Affiche toute erreur JS à l'écran (pas de console sur mobile). */
 window.addEventListener("error", e => {
@@ -142,16 +140,21 @@ window.addEventListener("error", e => {
 const EARTH_R = 6371000;
 const POLL_MS = 8000;
 /* Sources de données, testées dans l'ordre ; la première qui répond est
-   mémorisée. Les endpoints /v2 d'adsb.lol n'envoient pas d'en-têtes CORS,
-   d'où les solutions de repli : adsb.fi (v3) puis proxys CORS publics. */
-const PT = (la, lo, r) => `https://api.adsb.lol/v2/point/${la}/${lo}/${r}`;
+   mémorisée. Les deux passent par ce serveur, sur la même origine.
+
+   Deux raisons plutôt qu'une. Les endpoints d'adsb.lol n'envoient pas
+   d'en-têtes CORS, donc le navigateur ne peut pas les lire directement.
+   Et surtout, ces API refusent les adresses IP de centres de données —
+   403 pour adsb.fi et airplanes.live, 429 pour adsb.lol, dont le quota
+   est partagé entre tous les clients Cloudflare — alors qu'elles
+   répondent normalement à l'adresse résidentielle du serveur.
+
+   Les anciens replis vers api.allorigins.win et corsproxy.io ont été
+   retirés : ils transmettaient la position de l'utilisateur à des tiers
+   sans relation avec ce projet, silencieusement. */
 const SOURCES = [
-  ...(WORKER_BASE ? [{ name: "worker", url: (la, lo, r) => `${WORKER_BASE}/point/${la}/${lo}/${r}` }] : []),
-  { name: "adsb.lol",  url: (la, lo, r) => PT(la, lo, r) },
-  { name: "adsb.fi",   url: (la, lo, r) => `https://opendata.adsb.fi/api/v3/lat/${la}/lon/${lo}/dist/${r}` },
-  { name: "airplanes.live", url: (la, lo, r) => `https://api.airplanes.live/v2/point/${la}/${lo}/${r}` },
-  { name: "adsb.lol (proxy 1)", url: (la, lo, r) => `https://api.allorigins.win/raw?url=${encodeURIComponent(PT(la, lo, r))}` },
-  { name: "adsb.lol (proxy 2)", url: (la, lo, r) => `https://corsproxy.io/?url=${encodeURIComponent(PT(la, lo, r))}` },
+  { name: "adsb.lol", url: (la, lo, r) => `/relay/lol/${la}/${lo}/${r}` },
+  { name: "adsb.fi",  url: (la, lo, r) => `/relay/fi/${la}/${lo}/${r}` },
 ];
 
 const S = {
@@ -453,24 +456,17 @@ async function fetchRoutes(list) {
     let ok = false;
 
     // 1) Lots groupés, cibles par ordre de préférence.
-    const RS = "https://api.adsb.lol/api/0/routeset";
-    const batchTargets = [];
-    if (WORKER_BASE) batchTargets.push(WORKER_BASE + "/routes");
-    batchTargets.push(RS);
-    batchTargets.push("https://corsproxy.io/?url=" + encodeURIComponent(RS));
+    const batchTargets = ["/relay/routeset"];
     for (const t of batchTargets) {
       try { if (await routesetBatch(t, missing)) { ok = true; break; } }
       catch(e) {}
     }
 
-    // 2) Dernier recours : GET unitaires (direct, allorigins, corsproxy).
+    // 2) Dernier recours : GET unitaires, par le relais du serveur.
     if (!ok) {
       for (const a of missing.slice(0, 3)) {
-        const direct = `https://api.adsb.lol/api/0/route/${encodeURIComponent(a.callsign)}/${a.lat.toFixed(3)}/${a.lon.toFixed(3)}`;
         const urls = [
-          direct,
-          `https://api.allorigins.win/raw?url=${encodeURIComponent(direct)}`,
-          `https://corsproxy.io/?url=${encodeURIComponent(direct)}`,
+          `/relay/route/${encodeURIComponent(a.callsign)}/${a.lat.toFixed(3)}/${a.lon.toFixed(3)}`,
         ];
         for (const u of urls) {
           try {
@@ -988,9 +984,10 @@ function refreshDetail() {
 }
 
 /* ================= Démarrage ================= */
-$("workerState").textContent = WORKER_BASE
-  ? "Relais : " + WORKER_BASE.replace(/^https?:\/\//, "")
-  : "Relais worker non configuré (sources publiques)";
+/* Le relais est désormais l'origine de la page elle-même. On l'affiche
+   quand même : un utilisateur doit toujours pouvoir lire où partent ses
+   coordonnées. */
+$("workerState").textContent = "Relais : " + location.host;
 
 $("startBtn").addEventListener("click", async () => {
   const err = $("err");

@@ -12,8 +12,13 @@
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="manifest" href="manifest.json">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<!-- Leaflet 1.9.4, servi depuis ce domaine plutot que depuis cdnjs.
+     Un CDN tiers peut servir un script modifie a tout moment ; heberger
+     la bibliotheque supprime cette confiance implicite, et l'application
+     ne casse plus si cdnjs a un incident. Fichiers verifies contre le SRI
+     officiel de cdnjs au moment du rapatriement. -->
+<link rel="stylesheet" href="vendor/leaflet/leaflet.min.css">
+<script src="vendor/leaflet/leaflet.min.js"></script>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html, body { height:100%; overflow:hidden; background:#0a0f14; font-family:system-ui,-apple-system,sans-serif; color:#fff; }

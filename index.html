@@ -93,6 +93,10 @@
     background:#2a1d08; border-bottom:1px solid rgba(255,183,77,.45);
     display:flex; gap:12px; align-items:flex-start;
   }
+  /* Indispensable : la regle ci-dessus a une specificite d'ID et l'emporterait
+     sur le [hidden]{display:none} du navigateur. Sans cette ligne, le bandeau
+     masque reste une boite vide — une bande orange en haut de l'ecran. */
+  #moveBanner[hidden] { display:none; }
   #moveBanner .mb-body { flex:1; min-width:0; text-align:left; }
   #moveBanner .mb-t { font-size:14px; font-weight:700; color:#ffb74d; }
   #moveBanner .mb-p { font-size:12.5px; line-height:1.45; color:rgba(255,255,255,.82); margin-top:3px; }

@@ -84,9 +84,39 @@
   #startScreen p { font-size:14px; color:rgba(255,255,255,.65); max-width:340px; line-height:1.45; }
   #startBtn { position:static; font-size:17px; padding:14px 34px; }
   #err { color:#ffb74d; font-size:13px; max-width:340px; }
+
+  /* Bandeau de déménagement : rempli seulement sur l'ancienne adresse.
+     z-index 30 pour passer au-dessus de #startScreen (20). */
+  #moveBanner {
+    position:fixed; top:0; left:0; right:0; z-index:30;
+    padding:calc(env(safe-area-inset-top,0px) + 11px) 14px 12px;
+    background:#2a1d08; border-bottom:1px solid rgba(255,183,77,.45);
+    display:flex; gap:12px; align-items:flex-start;
+  }
+  #moveBanner .mb-body { flex:1; min-width:0; text-align:left; }
+  #moveBanner .mb-t { font-size:14px; font-weight:700; color:#ffb74d; }
+  #moveBanner .mb-p { font-size:12.5px; line-height:1.45; color:rgba(255,255,255,.82); margin-top:3px; }
+  #moveBanner .mb-a {
+    display:inline-block; margin-top:9px; padding:9px 15px; border-radius:20px;
+    background:#ffb74d; color:#241700; font-size:13.5px; font-weight:700;
+    text-decoration:none; word-break:break-all;
+  }
+  #moveBanner .mb-x {
+    flex:none; border:none; background:transparent; color:rgba(255,255,255,.5);
+    font-size:20px; line-height:1; padding:2px 4px; margin:-2px -4px 0 0;
+  }
+  /* Décaler ce que le bandeau recouvrirait. */
+  #status { top:calc(env(safe-area-inset-top,0px) + 10px + var(--banner-h,0px)); }
+  #startScreen { padding-top:calc(28px + var(--banner-h,0px)); }
 </style>
 </head>
 <body>
+
+<!-- Bandeau de déménagement. Volontairement vide ici : il n'est rempli que si
+     la page est servie depuis une ancienne adresse (voir plus bas). Le laisser
+     vide évite qu'il apparaisse une fraction de seconde chez ceux qui ont déjà
+     migré, et évite d'annoncer un déménagement sur le site d'arrivée. -->
+<div id="moveBanner" hidden></div>
 
 <video id="video" autoplay muted playsinline></video>
 <canvas id="overlay"></canvas>
@@ -134,6 +164,87 @@ quelques secondes selon la connexion.</small></div>
    origine. Voir /etc/nginx/snippets/relay-adsb.conf.
    ============================================================ */
 try { localStorage.removeItem("workerBase"); } catch (e) {}
+
+/* ============================================================
+   DÉMÉNAGEMENT — l'application change d'adresse.
+
+   Le bandeau ne s'affiche que si la page n'est PAS servie depuis
+   la nouvelle adresse : quelqu'un qui a déjà migré ne doit pas
+   lire qu'il doit migrer. Le test porte sur l'hôte courant, donc
+   il vaut pour n'importe quelle ancienne adresse, connue ou non.
+
+   Le lien s'ouvre dans le navigateur (target=_blank) et pas dans
+   l'application : installée en mode standalone, une navigation
+   interne ne proposerait jamais « Ajouter à l'écran d'accueil ».
+
+   Fermeture valable pour la session seulement : le rappel revient
+   à chaque lancement tant que l'ancienne version est installée.
+   ============================================================ */
+const NOUVEL_HOTE = "skyspotter.remibocquet.fr";
+const NOUVELLE_URL = "https://" + NOUVEL_HOTE + "/";
+const HOTES_LOCAUX = ["localhost", "127.0.0.1", "[::1]", "::1", ""];
+
+function poserBandeauDemenagement() {
+  const hote = location.hostname;
+  if (hote === NOUVEL_HOTE || HOTES_LOCAUX.includes(hote)) return;
+
+  let masque = false;
+  try { masque = sessionStorage.getItem("moveBannerFerme") === "1"; } catch (e) {}
+  if (masque) return;
+
+  const b = document.getElementById("moveBanner");
+  if (!b) return;
+
+  const corps = document.createElement("div");
+  corps.className = "mb-body";
+
+  const titre = document.createElement("div");
+  titre.className = "mb-t";
+  titre.textContent = "SkySpotter change d'adresse";
+
+  const texte = document.createElement("div");
+  texte.className = "mb-p";
+  texte.textContent =
+    "Cette adresse va cesser de fonctionner. Ouvrez la nouvelle adresse, "
+    + "réinstallez l'application depuis celle-ci (menu du navigateur, "
+    + "« Ajouter à l'écran d'accueil »), "
+    + "puis supprimez l'ancienne icône de votre téléphone.";
+
+  const lien = document.createElement("a");
+  lien.className = "mb-a";
+  lien.href = NOUVELLE_URL;
+  lien.target = "_blank";
+  lien.rel = "noopener noreferrer";
+  lien.textContent = NOUVEL_HOTE;
+
+  const fermer = document.createElement("button");
+  fermer.className = "mb-x";
+  fermer.type = "button";
+  fermer.setAttribute("aria-label", "Masquer jusqu'au prochain lancement");
+  fermer.textContent = "×";
+  fermer.addEventListener("click", () => {
+    try { sessionStorage.setItem("moveBannerFerme", "1"); } catch (e) {}
+    b.hidden = true;
+    majHauteurBandeau();
+  });
+
+  corps.append(titre, texte, lien);
+  b.append(corps, fermer);
+  b.hidden = false;
+
+  majHauteurBandeau();
+  addEventListener("resize", majHauteurBandeau);
+}
+
+/* Le bandeau recouvrirait #status et le haut de #startScreen : on publie sa
+   hauteur réelle (le texte peut se replier) pour que le CSS les décale. */
+function majHauteurBandeau() {
+  const b = document.getElementById("moveBanner");
+  const h = (b && !b.hidden) ? b.offsetHeight : 0;
+  document.documentElement.style.setProperty("--banner-h", h + "px");
+}
+
+poserBandeauDemenagement();
 
 /* Affiche toute erreur JS à l'écran (pas de console sur mobile). */
 window.addEventListener("error", e => {

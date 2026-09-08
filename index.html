@@ -8,8 +8,6 @@
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="canonical" href="https://skyspotter.remibocquet.fr/">
-<!-- Pas de <link rel="manifest"> : cette adresse ne doit plus être
-     installable. Seule la nouvelle doit l'être. -->
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html, body {
@@ -38,7 +36,6 @@
   .card ol { margin:9px 0 0 18px; }
   .card li { font-size:13.5px; line-height:1.55; color:rgba(255,255,255,.82); margin-top:6px; }
   .foot { font-size:12px; line-height:1.5; color:rgba(255,255,255,.45); margin-top:20px; }
-  /* Rempli par le script quand la page tourne dans l'application installée. */
   #standalone[hidden] { display:none; }
 </style>
 </head>
@@ -47,14 +44,13 @@
   <img class="logo" src="icon-192.png" alt="">
   <h1>SkySpotter a changé d'adresse</h1>
   <p class="sub">
-    L'application n'est plus hébergée ici. Elle est désormais servie à
-    l'adresse ci-dessous, qui est la seule à jour.
+    L'application est maintenant hébergée à l'adresse ci-dessous :
   </p>
 
   <a class="cta" href="https://skyspotter.remibocquet.fr/">skyspotter.remibocquet.fr</a>
 
   <div class="card">
-    <h2 id="standaloneTitre">Si vous aviez ajouté SkySpotter à votre écran d'accueil</h2>
+    <h2 id="standaloneTitre">Si vous aviez installé SkySpotter comme application :</h2>
     <ol>
       <li>Ouvrez <strong>skyspotter.remibocquet.fr</strong> dans votre navigateur.</li>
       <li>Réinstallez l'application depuis cette page : menu du navigateur,
@@ -62,19 +58,14 @@
       <li>Supprimez l'ancienne icône de votre téléphone.</li>
     </ol>
     <p class="sub" id="standalone" hidden style="font-size:13px;margin-top:10px">
-      Vous lisez ce message <strong>dans l'ancienne application installée</strong> :
-      elle ne peut plus se mettre à jour. Le lien ci-dessus s'ouvre dans votre
-      navigateur, c'est de là qu'il faut réinstaller.
+      Cette application a changé d'adresse ! Le lien ci-dessus ouvre le nouveau site web
+      qui héberge maitenant l'application.
     </p>
   </div>
 
   <p class="foot">Identification des avions en réalité augmentée (ADS-B).</p>
 </main>
 <script>
-/* Lancée depuis l'icône d'accueil, la page s'affiche sans barre d'adresse :
-   le lien doit alors sortir vers le navigateur, sinon la nouvelle adresse
-   s'ouvrirait dans la fenêtre de l'ancienne application installée et
-   « Ajouter à l'écran d'accueil » ne serait jamais proposé. */
 var installee = false;
 try {
   installee = matchMedia("(display-mode: standalone)").matches
